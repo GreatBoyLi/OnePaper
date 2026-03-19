@@ -111,12 +111,12 @@ if __name__ == "__main__":
     # ==========================================
     TARGET_VARS = ['albedo_03', 'tbb_07', 'tbb_13']
 
-    dates = pd.date_range(start=config["dates"]["start_date"],
-                          end=config["dates"]["end_date"], freq='D')
+    dates = pd.date_range(start=config["train_dates"]["start_date"],
+                          end=config["train_dates"]["end_date"], freq='D')
 
     print(f"🛰️ 卫星数据裁剪开始，总日期数: {len(dates)}，提取通道数: {len(TARGET_VARS)}")
 
-    num_cores = multiprocessing.cpu_count() - 5
+    num_cores = multiprocessing.cpu_count() - 15
 
     Parallel(n_jobs=num_cores, verbose=10)(
         delayed(process_single_day)(

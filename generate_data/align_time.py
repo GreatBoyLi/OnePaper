@@ -106,8 +106,8 @@ if __name__ == "__main__":
     CROP_DIR = config["file_paths"]["crop_statellite_path"]
     ALIGNED_DIR = config["file_paths"]["aligned_satellite_path"]
 
-    dates = pd.date_range(start=config["dates"]["start_date"],
-                          end=config["dates"]["end_date"], freq='D')
+    dates = pd.date_range(start=config["train_dates"]["start_date"],
+                          end=config["train_dates"]["end_date"], freq='D')
 
     print(f"🚀 开始并行时间对齐 (10min -> 15min，支持多通道)")
 

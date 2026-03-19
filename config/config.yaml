@@ -1,13 +1,29 @@
 # 1. 文件路径
-file_paths:
-  satellite_path: "../data/himawari_nc/"
-  crop_statellite_path: "../data/crop_himawari/"
-  aligned_satellite_path: "../data/crop_himawari/15min"
-  pv_file: "../data/筛选2020-2023数据.csv"
-  series_file: "../data/series.csv"
+train_file_paths:
+  satellite_path: "../data/train/himawari_nc/"
+  crop_statellite_path: "../data/train/crop_himawari/"
+  aligned_satellite_path: "../data/train/crop_himawari/15min"
+  pv_file: "../data/train/筛选2020-2023数据.csv"
+  series_file: "../data/train/series_file.csv"
+
+val_file_paths:
+  satellite_path: "../data/val/himawari_nc/"
+  crop_statellite_path: "../data/val/crop_himawari/"
+  aligned_satellite_path: "../data/val/crop_himawari/15min"
+  pv_file: "../data/val/筛选2020-2023数据.csv"
+  series_file: "../data/val/series_file.csv"
+
+
+scaler_params_paths: "../data/scaler_params.json"
 
 # 2. 电站配置
-stations:
+train_stations:
+  lat: -23.75
+  lon: 133.85
+  altitude: 545
+  capacity: 5
+
+val_stations:
   lat: -23.75
   lon: 133.85
   altitude: 545
@@ -18,7 +34,11 @@ statellite:
   crop_size: 96  # 96x96 pixels
 
 # 4. 要处理的时间
-dates:
+train_dates:
   start_date: "2020-01-01"
-  end_date: "2020-01-02" #"2022-10-08"
+  end_date: "2021-01-31" #"2022-10-08"
+
+val_dates:
+  start_date: "2021-02-01"
+  end_date: "2021-02-21" #"2022-10-08"
 

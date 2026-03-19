@@ -1,22 +1,31 @@
 import pandas as pd
 import pvlib
 import os
+import json  # 🌟 新增：用于保存和加载归一化参数
 from utils.config import load_config
 
 
 # ===========================================
 
-def process_timeseries(config):
-    CSV_PATH = config["file_paths"]["pv_file"]
-    OUTPUT_PATH = config["file_paths"]["series_file"]
-
-    START_DATE = config["dates"]["start_date"]
-    END_DATE = config["dates"]["end_date"]
-
-    LATITUDE = config["stations"]["lat"]
-    LONGITUDE = config["stations"]["lon"]
-    ALTITUDE = config["stations"]["altitude"]
-    CAPACITY = config["stations"]["capacity"]
+def process_timeseries(config, is_train=True):
+    if is_train:
+        CSV_PATH = config["train_file_paths"]["pv_file"]
+        OUTPUT_PATH = config["train_file_paths"]["series_file"]
+        START_DATE = config["train_dates"]["start_date"]
+        END_DATE = config["train_dates"]["end_date"]
+        LATITUDE = config["train_stations"]["lat"]
+        LONGITUDE = config["train_stations"]["lon"]
+        ALTITUDE = config["train_stations"]["altitude"]
+        CAPACITY = config["train_stations"]["capacity"]
+    else:
+        CSV_PATH = config["val_file_paths"]["pv_file"]
+        OUTPUT_PATH = config["val_file_paths"]["series_file"]
+        START_DATE = config["val_dates"]["start_date"]
+        END_DATE = config["val_dates"]["end_date"]
+        LATITUDE = config["val_stations"]["lat"]
+        LONGITUDE = config["val_stations"]["lon"]
+        ALTITUDE = config["val_stations"]["altitude"]
+        CAPACITY = config["val_stations"]["capacity"]
 
     print(f"🚀 开始处理时间序列数据: {CSV_PATH}")
 
@@ -37,8 +46,6 @@ def process_timeseries(config):
     print(f"   筛选后数据量 (5min): {len(df)} 条")
 
     # ========================================================
-    # 🌟 修改点 1：在这里把需要的新列加到列表中
-    # ========================================================
     target_columns = [
         'Active_Power',
         'Global_Horizontal_Radiation',
@@ -49,7 +56,7 @@ def process_timeseries(config):
     # 提取多列并一起进行 15 分钟重采样求平均
     df_15min = df[target_columns].resample('15min').mean()
 
-    # 线性插值填充少量缺失值 (同时作用于这 4 列)
+    # 线性插值填充少量缺失值
     df_15min = df_15min.interpolate(method='linear', limit=4)
     print(f"   重采样后数据量 (15min): {len(df_15min)} 条")
 
@@ -77,17 +84,69 @@ def process_timeseries(config):
     cs = location.get_clearsky(times, model='ineichen')
     df_15min['Clear_Sky_GHI'] = cs['ghi'].values
 
-    # 5. 保留所有数据 (不单独剔除夜间)
-    print(f"   清洗前: {len(df_15min)}")
+    # 5. 保留所有数据
     df_clean = df_15min
 
-    # 6. 归一化与数据防爆处理
+    # 6. 归一化与数据防爆处理 (目标值 Power_Norm 独立归一化)
     df_clean['Power_Norm'] = df_clean['Active_Power'] / CAPACITY
     df_clean['Power_Norm'] = df_clean['Power_Norm'].clip(lower=0)
     df_clean['Clear_Sky_GHI'] = df_clean['Clear_Sky_GHI'].clip(lower=0)
-
-    # 🌟 可选：对实测辐射也做一个基础的负值修正（夜间传感器可能出现微小负噪点）
     df_clean['Global_Horizontal_Radiation'] = df_clean['Global_Horizontal_Radiation'].clip(lower=0)
+
+    # ========================================================
+    # 🌟 核心修改：分离式特征归一化 (防止数据穿越)
+    # ========================================================
+    columns_to_normalize = [
+        'Global_Horizontal_Radiation',
+        'Weather_Temperature_Celsius',
+        'Weather_Relative_Humidity',
+        'Clear_Sky_GHI',
+        'Solar_Zenith'
+    ]
+
+    # 定义归一化参数 JSON 文件的保存路径 (保存在训练集输出的同级目录)
+    # 假设你的配置文件里写了绝对或相对路径，将其保存在 config 指定的地方最安全
+    scaler_path = config["scaler_params_paths"]
+
+    if is_train:
+        print("   正在提取【训练集】归一化参数并进行归一化...")
+        scaler_params = {}
+        for col in columns_to_normalize:
+            col_min = df_clean[col].min()
+            col_max = df_clean[col].max()
+
+            # 将 numpy 数值转换为 Python 原生 float 以便被 json 序列化
+            scaler_params[col] = {'min': float(col_min), 'max': float(col_max)}
+
+            if col_max - col_min == 0:
+                df_clean[col] = 0.0
+            else:
+                df_clean[col] = (df_clean[col] - col_min) / (col_max - col_min)
+
+        # 保存这把“尺子”
+        with open(scaler_path, 'w') as f:
+            json.dump(scaler_params, f, indent=4)
+        print(f"   ✅ 归一化参数已保存至: {scaler_path}")
+
+    else:
+        print("   正在加载【训练集】归一化参数对【验证/测试集】进行归一化...")
+        if not os.path.exists(scaler_path):
+            raise FileNotFoundError(f"❌ 找不到归一化参数文件 {scaler_path}，请先以 is_train=True 运行一次以生成尺子！")
+
+        # 读取这把“尺子”
+        with open(scaler_path, 'r') as f:
+            scaler_params = json.load(f)
+
+        for col in columns_to_normalize:
+            col_min = scaler_params[col]['min']
+            col_max = scaler_params[col]['max']
+
+            if col_max - col_min == 0:
+                df_clean[col] = 0.0
+            else:
+                df_clean[col] = (df_clean[col] - col_min) / (col_max - col_min)
+        print("   ✅ 验证/测试集归一化完成 (严格遵循训练集尺度，零穿越)")
+    # ========================================================
 
     print(f"   清洗后: {len(df_clean)}")
     print(f"   ✅ 最终特征列: {list(df_clean.columns)}")
@@ -97,9 +156,7 @@ def process_timeseries(config):
     df_clean.to_csv(OUTPUT_PATH)
     print(f"💾 处理完成！文件已保存至: {OUTPUT_PATH}")
 
-    # ========================================================
-    # 🌟 修改点 2：在打印预览时，展示所有核心列
-    # ========================================================
+    # 打印预览
     print("\n数据预览:")
     preview_cols = [
         'Power_Norm',
@@ -113,4 +170,11 @@ def process_timeseries(config):
 
 if __name__ == "__main__":
     config = load_config("../config/config.yaml")
-    process_timeseries(config)
+
+    # 1. 先跑训练集，生成数据并固化归一化参数 (生成 scaler_params.json)
+    print("========== 阶段 1: 处理训练集 ==========")
+    process_timeseries(config, is_train=True)
+
+    # 2. 再跑验证/测试集，加载 JSON 参数对新数据进行严格按比例缩放
+    print("\n========== 阶段 2: 处理验证/测试集 ==========")
+    process_timeseries(config, is_train=False)
