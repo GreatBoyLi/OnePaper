@@ -1,0 +1,24 @@
+# 1. 文件路径
+file_paths:
+  satellite_path: "../data/himawari_nc/"
+  crop_statellite_path: "../data/crop_himawari/"
+  aligned_satellite_path: "../data/crop_himawari/15min"
+  pv_file: "../data/筛选2020-2023数据.csv"
+  series_file: "../data/series.csv"
+
+# 2. 电站配置
+stations:
+  lat: -23.75
+  lon: 133.85
+  altitude: 545
+  capacity: 5
+
+# 3. 要处理的卫星图像
+statellite:
+  crop_size: 96  # 96x96 pixels
+
+# 4. 要处理的时间
+dates:
+  start_date: "2020-01-01"
+  end_date: "2020-01-02" #"2022-10-08"
+
