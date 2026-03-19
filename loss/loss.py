@@ -1,25 +1,72 @@
 import torch
 import torch.nn as nn
 
-
-def masked_mse_loss(preds, targets, zenith_angles):
+def masked_mse_loss(preds, targets, zeniths, threshold=86.0):
     """
-    带掩码的 MSE 损失函数：只计算太阳天顶角 <= 85° (即白天) 的预测误差。
+    标准的 Masked MSE：只计算白天的误差，并除以白天的总点数。
     """
-    # 按照论文，天顶角 <= 85° 时才是有效的白天数据
-    # mask 的形状与 preds/targets 相同: (Batch_Size, output_seq_len)
-    mask = zenith_angles <= 86.0
+    # 创建白天掩码 (Batch, Seq)
+    daytime_mask = (zeniths <= threshold).float()
 
-    # 如果这个 Batch 全是深夜（比如凌晨 2 点），mask 全部为 False
-    if mask.sum() == 0:
-        # 为了防止梯度断裂报错，返回一个带梯度的 0
-        return (preds * 0.0).sum()
+    # 计算平方误差
+    mse_elements = (preds - targets) ** 2
 
-    # 只提取白天的预测值和真实值进行 MSE 计算
-    daytime_preds = preds[mask]
-    daytime_targets = targets[mask]
+    # 施加掩码
+    masked_mse_elements = mse_elements * daytime_mask
 
-    return torch.mean((daytime_preds - daytime_targets) ** 2)
+    # 计算平均值 (只除以白天点的数量，防止被夜晚稀释)
+    # 添加 1e-8 防止除以 0
+    loss = masked_mse_elements.sum() / (daytime_mask.sum() + 1e-8)
+    return loss
+
+
+def gradient_rmse_loss(preds, targets, zeniths, threshold=86.0):
+    """
+    爬坡损失 (Gradient/Variational Loss)：
+    计算预测曲线和真实曲线一阶差分（变化率）的 RMSE。
+    同样只在白天计算。
+    """
+    # 1. 计算一阶差分 (沿着时间步维度 dim=1)
+    # diff 后的维度是 (Batch, Seq-1)
+    preds_diff = torch.diff(preds, dim=1)
+    targets_diff = torch.diff(targets, dim=1)
+
+    # 2. 处理掩码：差分后少了一个时间步，需要对 zeniths 也做相应处理
+    # 我们取前后两个时间步的天顶角的最大值，只要有一个是深夜，就不算差分误差
+    zeniths_max = torch.max(zeniths[:, :-1], zeniths[:, 1:])
+    daytime_mask = (zeniths_max <= threshold).float()
+
+    # 3. 计算差分的平方误差
+    diff_mse_elements = (preds_diff - targets_diff) ** 2
+
+    # 4. 施加掩码并计算平均
+    masked_diff_elements = diff_mse_elements * daytime_mask
+    loss = masked_diff_elements.sum() / (daytime_mask.sum() + 1e-8)
+
+    # 5. 开方得到 RMSE 量级，方便与主 Loss 融合
+    return torch.sqrt(loss + 1e-8)
+
+
+def physics_constraint_loss(preds, clearsky_limits, zeniths, threshold=86.0):
+    """
+    物理约束损失：
+    惩罚任何时刻【预测功率 > 理论晴空功率】的情况。
+    公式：ReLU(Pred - Clearsky) 的平均值。
+    """
+    # 1. 计算越界量：如果 Pred > Clearsky，结果为正；否则为负
+    violation = preds - clearsky_limits
+
+    # 2. 使用 ReLU 只保留正值（即越界的部分），负值（合法的）变为 0
+    lower_bound_zero = torch.zeros_like(violation)
+    violation_clipped = torch.max(lower_bound_zero, violation)  # 同 F.relu(violation)
+
+    # 3. 施加白天掩码 (物理约束通常只在白天有意义)
+    daytime_mask = (zeniths <= threshold).float()
+    masked_violation = violation_clipped * daytime_mask
+
+    # 4. 计算平均越界程度
+    loss = masked_violation.sum() / (daytime_mask.sum() + 1e-8)
+    return loss
 
 
 class DCCALoss(nn.Module):

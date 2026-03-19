@@ -3,72 +3,54 @@ from torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
 import os
-from utils.config import load_config
 
 
 class SatellitePVDataset(Dataset):
     def __init__(self, csv_path, satellite_dir,
                  input_seq_len=16, output_seq_len=4,
-                 crop_size=96,
-                 mode='train', train_ratio=0.7, val_ratio=0.2):
+                 crop_size=96, mode="train"):
 
         self.input_len = input_seq_len
         self.output_len = output_seq_len
         self.satellite_dir = satellite_dir
         self.crop_size = crop_size
 
-        # 1. 读取 CSV
-        self.df = pd.read_csv(csv_path, parse_dates=True, index_col=0)
-        self.df = self.df.sort_index()
+        # 1. 读取已经由 process_timeseries.py 预处理好的 CSV
+        self.data = pd.read_csv(csv_path, parse_dates=True, index_col=0)
+        self.data = self.data.sort_index()
 
-        # ==========================================
-        # 🌟 核心升级 5：时间序列的正余弦周期性编码
-        # ==========================================
-        # 提取时间元素
-        day_of_year = self.df.index.dayofyear
-        minute_of_day = self.df.index.hour * 60 + self.df.index.minute
+        # 2. 时间序列的正余弦周期性编码 (捕捉日夜与季节周期规律)
+        day_of_year = self.data.index.dayofyear
+        minute_of_day = self.data.index.hour * 60 + self.data.index.minute
 
-        # 年周期 (区分春夏秋冬，适应太阳直射点的回归运动)
-        self.df['sin_day'] = np.sin(2 * np.pi * day_of_year / 365.25)
-        self.df['cos_day'] = np.cos(2 * np.pi * day_of_year / 365.25)
+        self.data['sin_day'] = np.sin(2 * np.pi * day_of_year / 365.25)
+        self.data['cos_day'] = np.cos(2 * np.pi * day_of_year / 365.25)
+        self.data['sin_min'] = np.sin(2 * np.pi * minute_of_day / (24 * 60))
+        self.data['cos_min'] = np.cos(2 * np.pi * minute_of_day / (24 * 60))
 
-        # 日周期 (区分早中晚，适应地球自转)
-        self.df['sin_min'] = np.sin(2 * np.pi * minute_of_day / (24 * 60))
-        self.df['cos_min'] = np.cos(2 * np.pi * minute_of_day / (24 * 60))
-
-        # 2. 划分数据集
-        n = len(self.df)
-        train_end = int(n * train_ratio)
-        val_end = int(n * (train_ratio + val_ratio))
-
-        if mode == 'train':
-            self.data = self.df.iloc[:train_end]
-        elif mode == 'val':
-            self.data = self.df.iloc[train_end:val_end]
-        elif mode == 'test':
-            self.data = self.df.iloc[val_end:]
-        else:
-            raise ValueError(f"不支持的 mode: {mode}")
-
-        # 3. 严格的时间连续性校验
+        # 3. 严格的时间连续性校验 (黑夜过滤全权交由 train.py 的 mask 控制)
         self.valid_indices = []
         total_len = self.input_len + self.output_len
         expected_time_delta = pd.Timedelta(minutes=15 * (total_len - 1))
 
         max_possible_idx = len(self.data) - total_len
+
         for i in range(max_possible_idx + 1):
             start_time = self.data.index[i]
             end_time = self.data.index[i + total_len - 1]
 
+            # 校验时间序列是否连续无断层
             if end_time - start_time == expected_time_delta:
                 self.valid_indices.append(i)
 
-        print(f"[{mode}] 数据集加载完成 | 原始行数: {len(self.data)} | 连续有效样本: {len(self.valid_indices)}")
+        print(f"[{mode}] 数据集加载完成 | 原始总时间步: {len(self.data)}")
+        print(f"   -> ✅ 最终连续有效样本: {len(self.valid_indices)}")
 
     def __len__(self):
         return len(self.valid_indices)
 
     def _get_safe_background(self, timestamp):
+        # 季节性安全背景填充逻辑，保持不变
         month = timestamp.month
         hour = timestamp.hour
 
@@ -80,7 +62,6 @@ class SatellitePVDataset(Dataset):
             season = 'transition'
 
         is_day = 7 <= hour <= 18
-
         safe_albedo = 0.2 if is_day else 0.0
 
         if season == 'summer':
@@ -99,85 +80,154 @@ class SatellitePVDataset(Dataset):
         hist_end = real_idx + self.input_len
         future_end = hist_end + self.output_len
 
-        # ==========================================
-        # 🌟 核心升级 6：将时间特征加入网络输入列表
-        # ==========================================
+        # 🌟 网络输入数值特征
+        # 确保全部是归一化后的数据，保证模型梯度平稳
         features = [
             'Power_Norm',
             'Global_Horizontal_Radiation',
             'Weather_Temperature_Celsius',
             'Weather_Relative_Humidity',
-            'Clear_Sky_GHI',
+            'Clear_Sky_GHI',  # 👈 直接读取 CSV 中已有的归一化晴空基准
             'Solar_Zenith',
-            'sin_day', 'cos_day',  # 👈 新增的年周期特征
-            'sin_min', 'cos_min'  # 👈 新增的日周期特征
+            'sin_day', 'cos_day',
+            'sin_min', 'cos_min'
         ]
 
         x_numeric = self.data.iloc[hist_start:hist_end][features].values
+
+        # 🌟 现在的 y 获取逻辑极其简洁，直接读取 CSV 中对应的列即可
         y_power = self.data.iloc[hist_end:future_end]['Power_Norm'].values
-        y_zenith = self.data.iloc[hist_end:future_end]['Solar_Zenith'].values
+        y_csi = self.data.iloc[hist_end:future_end]['CSI'].values
+        y_clear_sky_ghi = self.data.iloc[hist_end:future_end]['Clear_Sky_GHI'].values
+        y_zenith_raw = self.data.iloc[hist_end:future_end]['Solar_Zenith_Raw'].values
 
-        # 获取图像数据
+        # ==========================================
+        # 以下获取图像及线性插值的逻辑保持不变
+        # ==========================================
         hist_timestamps = self.data.index[hist_start:hist_end]
-        images = []
-        last_valid_img = None
 
+        # 1. 第一阶段：尝试读取所有存在的图像，缺失的用 None 占位
+        raw_images = []
         for ts in hist_timestamps:
-            bg_values = self._get_safe_background(ts)
-            current_safe_bg = bg_values[:, None, None] * np.ones((3, self.crop_size, self.crop_size), dtype=np.float32)
-
             file_name = f"sat_15min_{ts.strftime('%Y%m%d_%H%M')}.npy"
             yyyy, mm, dd = ts.strftime("%Y"), ts.strftime("%m"), ts.strftime("%d")
             yyyymm = f"{yyyy}{mm}"
             file_path = os.path.join(self.satellite_dir, yyyymm, dd, file_name)
 
+            img_valid = False
             if os.path.exists(file_path):
                 img = np.load(file_path).astype(np.float32)
 
-                if img.shape != (3, self.crop_size, self.crop_size):
-                    img = last_valid_img.copy() if last_valid_img is not None else current_safe_bg.copy()
-                else:
-                    for c in range(3):
-                        if np.isnan(img[c]).any() or np.isinf(img[c]).any():
-                            valid_mean = np.nanmean(img[c][~np.isinf(img[c])])
-                            if np.isnan(valid_mean):
-                                img[c] = last_valid_img[c] if last_valid_img is not None else current_safe_bg[c]
-                            else:
-                                img[c] = np.nan_to_num(img[c], nan=valid_mean, posinf=valid_mean, neginf=valid_mean)
-                last_valid_img = img.copy()
-            else:
-                img = last_valid_img.copy() if last_valid_img is not None else current_safe_bg.copy()
+                if img.shape == (3, self.crop_size, self.crop_size):
+                    # 🌟 计算损坏像素的比例
+                    bad_mask = np.isnan(img) | np.isinf(img)
+                    bad_ratio = bad_mask.sum() / img.size
 
+                    if bad_ratio == 0:
+                        # 完美图像，直接采用
+                        raw_images.append(img)
+                        img_valid = True
+                    elif bad_ratio < 0.10:
+                        # 🌟 损坏比例小于 10%，只坏了几个点，我们抢救它！
+                        for c in range(3):
+                            c_data = img[c]
+                            c_bad = bad_mask[c]
+                            if c_bad.any():
+                                # 取该通道中所有【正常像素】的平均值
+                                valid_pixels = c_data[~bad_mask[c]]
+                                # 防止该通道全坏导致 valid_mean 报错
+                                valid_mean = np.nanmean(valid_pixels) if len(valid_pixels) > 0 else 0.0
+                                # 用平均值填补坏点
+                                c_data[c_bad] = valid_mean
+                            img[c] = c_data
+
+                        raw_images.append(img)
+                        img_valid = True
+                    else:
+                        # 损坏严重 (>10%)，放弃抢救，交给后面的线性插值去处理
+                        pass
+
+                        # 如果图片不存在，或者损坏过于严重，填入 None
+            if not img_valid:
+                raw_images.append(None)
+
+        # 2. 第二阶段：🌟 核心线性插值逻辑 🌟
+        for i in range(len(raw_images)):
+            if raw_images[i] is None:
+                # 向前寻找最近的有效帧
+                prev_idx = i - 1
+                while prev_idx >= 0 and raw_images[prev_idx] is None:
+                    prev_idx -= 1
+
+                # 向后寻找最近的有效帧
+                next_idx = i + 1
+                while next_idx < len(raw_images) and raw_images[next_idx] is None:
+                    next_idx += 1
+
+                # 场景 1：前后都有有效图像 -> 线性插值
+                if prev_idx >= 0 and next_idx < len(raw_images):
+                    dist_prev = i - prev_idx
+                    dist_next = next_idx - i
+                    total_dist = dist_prev + dist_next
+
+                    # 距离越近，权重越大
+                    w_prev = dist_next / total_dist
+                    w_next = dist_prev / total_dist
+
+                    interp_img = raw_images[prev_idx] * w_prev + raw_images[next_idx] * w_next
+                    raw_images[i] = interp_img
+
+                # 场景 2：只有前面有有效帧 -> 直接复制前一帧
+                elif prev_idx >= 0:
+                    raw_images[i] = raw_images[prev_idx].copy()
+
+                # 场景 3：只有后面有有效帧 -> 直接复制后一帧
+                elif next_idx < len(raw_images):
+                    raw_images[i] = raw_images[next_idx].copy()
+
+                # 场景 4：整段序列 16 步全部缺失！-> 用安全背景兜底
+                else:
+                    ts = hist_timestamps[i]
+                    bg_values = self._get_safe_background(ts)
+                    safe_bg = bg_values[:, None, None] * np.ones((3, self.crop_size, self.crop_size), dtype=np.float32)
+                    raw_images[i] = safe_bg
+
+        # 3. 第三阶段：统一的归一化处理
+        final_images = []
+        for img in raw_images:
             img[0] = np.clip(img[0], 0.0, 1.0)
             img[1:] = (img[1:] - 180.0) / (345.0 - 180.0)
             img[1:] = np.clip(img[1:], 0.0, 1.0)
+            final_images.append(img)
 
-            images.append(img)
-
-        x_images = np.stack(images, axis=0)
+        x_images = np.stack(final_images, axis=0)
 
         return {
-            'x_images': torch.from_numpy(x_images).float(),  # Shape: (16, 3, 96, 96)
-            'x_numeric': torch.from_numpy(x_numeric).float(),  # Shape: (16, 10) 👈 特征数变为10
-            'y': torch.from_numpy(y_power).float(),  # Shape: (4,)
-            'y_zenith': torch.from_numpy(y_zenith).float()  # Shape: (4,)
+            'x_images': torch.from_numpy(x_images).float(),
+            'x_numeric': torch.from_numpy(x_numeric).float(),
+            'y_power': torch.from_numpy(y_power).float(),  # 真实功率 (Loss 评估备用)
+            'y_csi': torch.from_numpy(y_csi).float(),  # 真实CSI (主要预测目标)
+            'y_clear_sky_ghi': torch.from_numpy(y_clear_sky_ghi).float(),  # 未来晴空基准 (用于还原功率)
+            'y_zenith': torch.from_numpy(y_zenith_raw).float()  # 真实物理角度 (用于掩蔽黑夜 Loss)
         }
 
 
 if __name__ == "__main__":
+    from utils.config import load_config
+
     config = load_config("../config/config.yaml")
-    csv_file = config["file_paths"]["series_file"]
-    sat_dir = config["file_paths"]["aligned_satellite_path"]
+    csv_file = config["val_file_paths"]["series_file"]
+    sat_dir = config["val_file_paths"]["aligned_satellite_path"]
 
     if os.path.exists(csv_file):
         c_size = config.get("statellite", {}).get("crop_size", 96)
 
-        ds = SatellitePVDataset(csv_file, sat_dir, crop_size=c_size, mode='train')
+        ds = SatellitePVDataset(csv_file, sat_dir, crop_size=c_size)
         if len(ds) > 0:
             sample = ds[0]
             print(f"Input Image Shape : {sample['x_images'].shape}   # 预期: (16, 3, 96, 96)")
-            print(f"Input Numeric Shape: {sample['x_numeric'].shape} # 预期: (16, 10) <- 包含了4个时间特征")
-            print(f"Target Power Shape : {sample['y'].shape}         # 预期: (4,)")
+            print(f"Input Numeric Shape: {sample['x_numeric'].shape} # 预期: (16, 10)")
+            print(f"Target CSI Shape   : {sample['y_csi'].shape}       # 预期: (4,)")
             print(f"Target Zenith Shape: {sample['y_zenith'].shape}  # 预期: (4,)")
     else:
         print("请先生成对齐后的 CSV 文件")

@@ -16,6 +16,8 @@ val_file_paths:
 
 scaler_params_paths: "../data/scaler_params.json"
 
+pkg_path: "../checkpoints/"
+
 # 2. 电站配置
 train_stations:
   lat: -23.75

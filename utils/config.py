@@ -3,6 +3,10 @@ import yaml
 import logging
 import datetime
 import matplotlib.pyplot as plt  # 【新增 1】导入绘图库
+import random
+import numpy as np
+import torch
+import torch.nn as nn
 
 
 def load_config(config_path):
@@ -95,3 +99,44 @@ def plot_loss_curve(train_losses, val_losses, save_path, logger):
     plt.savefig(save_path, dpi=300)
     plt.close()  # 关闭画布释放内存
     logger.info(f"📈 损失曲线图已保存至: {save_path}")
+
+
+# ================= 1. 设置随机种子 =================
+def set_seed(logger, seed=42):
+    """固定所有的随机种子，确保实验可复现"""
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)  # 如果使用多卡
+
+    # 针对 CuDNN 设置确定性行为 (可选，如果对绝对复现要求高的话开启)
+    # 注意：开启 cudnn.deterministic 可能会略微降低训练速度
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+
+    logger.info(f"🌱 全局随机种子已设置为: {seed}")
+
+
+# ================= 2. 权重初始化 =================
+def init_weights(m):
+    """
+    遍历模型的各个子模块，并根据不同类型进行初始化。
+    对于 Transformer 架构，通常使用 Xavier (Glorot) 初始化。
+    对于 CNN 架构，通常使用 Kaiming (He) 初始化。
+    """
+    if isinstance(m, nn.Linear):
+        # 线性层：Xavier 初始化（适合包含 Transformer 或全连接层的网络）
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv1d):
+        # 卷积层：Kaiming 初始化（配合 ReLU/GELU 效果好）
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.LayerNorm) or isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
+        # 归一化层：权重设为 1，偏置设为 0
+        nn.init.ones_(m.weight)
+        nn.init.zeros_(m.bias)

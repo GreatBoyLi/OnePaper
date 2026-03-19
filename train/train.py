@@ -8,20 +8,22 @@ from tqdm import tqdm
 # 导入自己写的模块
 from dataset.dataset import SatellitePVDataset
 from model.mymodel import MultiModalPVNet
-from utils.config import load_config, setup_logger, plot_metrics_curve, plot_loss_curve
+from utils.config import load_config, setup_logger, plot_metrics_curve, plot_loss_curve, set_seed, init_weights
 from utils.metrics import evaluate_metrics
-from loss.loss import masked_mse_loss, DCCALoss
+from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 # ================= 配置区域 (Hyperparameters) =================
 # 加载配置
 config = load_config("../config/config.yaml")
 
 # 路径设置
-CSV_PATH = config["file_paths"]["series_file"]
-SAT_DIR = config["file_paths"]["aligned_satellite_path"]
-SAVE_DIR = "../checkpoints/"
+TRAIN_CSV_PATH = config["train_file_paths"]["series_file"]
+TRAIN_SAT_DIR = config["train_file_paths"]["aligned_satellite_path"]
+VAL_CSV_PATH = config["val_file_paths"]["series_file"]
+VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
+SAVE_DIR = config["pkg_path"]
 
 # 🌟 1. 初始化日志
 logger = setup_logger(SAVE_DIR)
@@ -33,13 +35,14 @@ NUM_EPOCHS = 100
 PATIENCE = 100
 WEIGHT_DECAY = 1e-3
 DROPOUT = 0.3
-TRAIN_RATIO = 0.8
-VAL_RATIO = 0.2
 SELF_DEPTH = 3
 CROSS_DEPTH = 3
 FINAL_DIM = 64
 TRANSFORMER_DIM = 128
 HEADS = 4
+ALPHA = 1.0  # Masked MSE 的权重 (主 Loss)
+BETA = 0.5  # Grad Loss (爬坡) 的权重 (通常设在 0.1~0.5)
+GAMMA = 0.1  # Physics Loss 的权重 (通常不需要太大，能约束住就行)
 
 # 硬件设置
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -47,54 +50,78 @@ logger.info(f"🚀 使用设备: {DEVICE}")
 
 
 # ============================================================
-def train_one_epoch(model, loader, criterion, optimizer, device, scheduler):
+def train_one_epoch(model, loader, optimizer, device, scheduler):
     model.train()
     running_loss = 0.0
+    running_mse = 0.0
+    running_grad = 0.0
+    running_phy = 0.0
+
     loop = tqdm(loader, desc="Training", leave=False)
 
     for batch in loop:
         imgs = batch['x_images'].to(device)
         nums = batch['x_numeric'].to(device)
-        targets = batch['y'].to(device)
+        targets = batch['y_power'].to(device)
         zeniths = batch['y_zenith'].to(device)  # 🌟 拿到天顶角
 
         optimizer.zero_grad()
-        # preds, v_feat, t_feat = model(imgs, nums)
-        preds = model(imgs, nums)
 
-        # 🌟 1. 计算 Masked MSE (不管黑夜的死活，只算白天的预测误差)
-        # loss_mse = criterion_mse(preds, targets)  # 预测准不准
-        loss_mse = masked_mse_loss(preds, targets, zeniths)
+        # 1. 模型输出是 CSI
+        preds_csi = model(imgs, nums)
 
-        # 计算多目标 Loss
-        # 🌟 2. 筛选出属于“白天”的样本，才送去算 DCCA
-        # 只要这个样本的预测窗口里有任意一个时刻 <= 85°，我们就认为它包含了白天特征
-        # daytime_sample_mask = (zeniths <= 86.0).any(dim=1)
-        # # 提取白天样本的特征
-        # valid_v_feat = v_feat[daytime_sample_mask]
-        # valid_t_feat = t_feat[daytime_sample_mask]
-        #
-        # # 如果这个 Batch 里至少有 2 个白天样本 (DCCA 算相关性至少需要 2 个样本)
-        # if valid_v_feat.size(0) > 1:
-        #     loss_dcca = criterion_dcca(valid_v_feat, valid_t_feat)
-        # else:
-        #     loss_dcca = torch.tensor(0.0, device=device)
-        # loss = criterion(preds, targets)
-        # 论文总损失公式
-        loss = loss_mse  # + lambda_c * loss_dcca
-        loss.backward()
+        # 🌟 2. 拿到预测窗口对应的理论晴空功率 (确保 Dataset 里有返回这个字段)
+        y_clearsky = batch['y_clear_sky_ghi'].to(device)
+
+        # 🌟 3. 物理还原：将 CSI 转换为实际预测功率
+        preds_power = preds_csi * y_clearsky
+
+        # 🌟 3. 分别计算三个子 Loss
+        # (A) Masked MSE (主损失)
+        loss_mse = masked_mse_loss(preds_power, targets, zeniths)
+
+        # (B) Grad Loss (捕获爬坡趋势)
+        loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
+
+        # (C) Physics Loss (约束上限)
+        loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
+
+        # 🌟 4. 混合损失函数 (Total Loss)
+        # 使用配置区域定义的 ALPHA, BETA, GAMMA
+        total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy
+
+        total_loss.backward()
         optimizer.step()
 
         # ✅ 新增：每个 Batch 更新完权重后，微调一次学习率
         scheduler.step()
 
-        running_loss += loss.item()
-        loop.set_postfix(loss=loss.item())  # , loss_mse=loss_mse.item(), loss_dcca=loss_dcca.item())
+        # 记录日志
+        running_loss += total_loss.item()
+        running_mse += loss_mse.item()
+        running_grad += loss_grad.item()
+        running_phy += loss_phy.item()
 
-    return running_loss / len(loader)
+        # tqdm 进度条显示详细 Loss
+        loop.set_postfix(
+            T=f"{total_loss.item():.4f}",
+            M=f"{loss_mse.item():.4f}",
+            G=f"{loss_grad.item():.4f}",
+            P=f"{loss_phy.item():.4f}"
+        )
+
+    # 计算 Epoch 平均 Loss
+    num_batches = len(loader)
+    avg_total_loss = running_loss / num_batches
+
+    # Logger 里打印详细的子 Loss 平均值
+    logger.info(
+        f"Avg MSE: {running_mse / num_batches:.6f}, Avg Grad: {running_grad / num_batches:.6f}, Avg Phy: {running_phy / num_batches:.6f}")
+
+    return avg_total_loss
 
 
-def validate(model, loader, criterion, device):
+def validate(model, loader, device):
     model.eval()
     running_loss = 0.0
 
@@ -106,41 +133,33 @@ def validate(model, loader, criterion, device):
         for batch in loader:
             imgs = batch['x_images'].to(device)
             nums = batch['x_numeric'].to(device)
-            targets = batch['y'].to(device)
+            targets = batch['y_power'].to(device)
             zeniths = batch['y_zenith'].to(device)  # 🌟 拿到天顶角
 
-            # preds, v_feat, t_feat = model(imgs, nums)
-            preds = model(imgs, nums)
+            # 1. 模型预测 CSI
+            preds_csi = model(imgs, nums)
 
-            # 计算 Loss
-            # 🌟 1. 计算 Masked MSE (不管黑夜的死活，只算白天的预测误差)
-            # loss_mse = criterion_mse(preds, targets)  # 预测准不准
-            loss_mse = masked_mse_loss(preds, targets, zeniths)
+            # 🌟 2. 拿到预测窗口对应的理论晴空功率 (确保 Dataset 里有返回这个字段)
+            y_clearsky = batch['y_clear_sky_ghi'].to(device)
+
+            # 🌟 3. 物理还原：将 CSI 转换为实际预测功率
+            preds_power = preds_csi * y_clearsky
+
+            # 🌟 4. 使用还原后的【预测功率】和【真实功率 targets】计算 Loss
+            loss_mse = masked_mse_loss(preds_power, targets, zeniths)
 
             # 3. 物理后处理：创建夜晚掩码
             # 如果天顶角 > 86°，说明太阳已落山或在地平线以下
             night_mask = zeniths > 86
-            # 把夜晚的时段抹除
-            preds[night_mask] = 0.0
 
-            # # 计算多目标 Loss
-            # # 🌟 2. 筛选出属于“白天”的样本，才送去算 DCCA
-            # # 只要这个样本的预测窗口里有任意一个时刻 <= 85°，我们就认为它包含了白天特征
-            # daytime_sample_mask = (zeniths <= 86.0).any(dim=1)
-            # # 提取白天样本的特征
-            # valid_v_feat = v_feat[daytime_sample_mask]
-            # valid_t_feat = t_feat[daytime_sample_mask]
-            #
-            # # 如果这个 Batch 里至少有 2 个白天样本 (DCCA 算相关性至少需要 2 个样本)
-            # if valid_v_feat.size(0) > 1:
-            #     loss_dcca = criterion_dcca(valid_v_feat, valid_t_feat)
-            # else:
-            #     loss_dcca = torch.tensor(0.0, device=device)
-            loss = loss_mse  # + lambda_c * loss_dcca
+            # 🌟 抹除夜晚的时段 (对 preds_power 操作)
+            preds_power[night_mask] = 0.0
+
+            loss = loss_mse
             running_loss += loss.item()
 
-            # 🌟 新增：把数据转移到 CPU 并存入列表，防止撑爆显存
-            all_preds.append(preds.cpu())
+            # 🌟 将还原并掩码后的【预测功率】存入列表，用于后续计算指标
+            all_preds.append(preds_power.cpu())
             all_targets.append(targets.cpu())
 
     # 🌟 新增：将列表中的 Tensor 在第 0 维度（Batch 维度）拼接起来
@@ -158,13 +177,19 @@ def main():
     if not os.path.exists(SAVE_DIR):
         os.makedirs(SAVE_DIR)
 
+    # 🌟 1. 在这里调用设置随机种子 (例如设为 42)
+    set_seed(logger, 42)
+
     logger.info("📂 正在加载数据集...")
-    if not os.path.exists(CSV_PATH) or not os.path.exists(SAT_DIR):
-        logger.info(f"❌ 错误: 找不到数据文件。请检查路径:\n CSV: {CSV_PATH}\n SAT: {SAT_DIR}")
+    if not os.path.exists(TRAIN_CSV_PATH) or not os.path.exists(TRAIN_SAT_DIR):
+        logger.info(f"❌ 错误: 找不到数据文件。请检查路径:\n CSV: {TRAIN_CSV_PATH}\n SAT: {TRAIN_SAT_DIR}")
+        return
+    if not os.path.exists(VAL_CSV_PATH) or not os.path.exists(VAL_SAT_DIR):
+        logger.info(f"❌ 错误: 找不到数据文件。请检查路径:\n CSV: {VAL_CSV_PATH}\n SAT: {VAL_SAT_DIR}")
         return
 
-    train_dataset = SatellitePVDataset(CSV_PATH, SAT_DIR, mode='train', train_ratio=TRAIN_RATIO, val_ratio=VAL_RATIO)
-    val_dataset = SatellitePVDataset(CSV_PATH, SAT_DIR, mode='val', train_ratio=TRAIN_RATIO, val_ratio=VAL_RATIO)
+    train_dataset = SatellitePVDataset(TRAIN_CSV_PATH, TRAIN_SAT_DIR, mode="train")
+    val_dataset = SatellitePVDataset(VAL_CSV_PATH, VAL_SAT_DIR, mode="val")
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
@@ -180,7 +205,11 @@ def main():
         output_seq_len=4,  # 预测未来4个时间步
         dropout=DROPOUT
     ).to(DEVICE)
-    criterion = nn.MSELoss()
+
+    # 🌟 2. 在这里应用权重初始化
+    model.apply(init_weights)
+    logger.info("✨ 模型权重初始化完成 (Xavier/Kaiming)")
+
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     # 2. 使用 OneCycleLR (自带 Warmup 和平滑余弦衰减)
     # max_lr 可以比原来稍微激进一点，比如 3e-4，因为有了 Warmup 保护
@@ -217,8 +246,8 @@ def main():
     logger.info("-" * 60)
 
     for epoch in range(NUM_EPOCHS):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE, scheduler)
-        val_loss, val_metrics = validate(model, val_loader, criterion, DEVICE)
+        train_loss = train_one_epoch(model, train_loader, optimizer, DEVICE, scheduler)
+        val_loss, val_metrics = validate(model, val_loader, DEVICE)
         logger.info(val_metrics)
         # 获取当前刚刚被降下来的学习率
         current_lr = optimizer.param_groups[0]['lr']
@@ -298,7 +327,7 @@ def main():
             break
 
     logger.info("-" * 60)
-    logger.info("🎉 训练结束！最佳模型已保存在: %s", os.path.join(SAVE_DIR, "best_model.pth"))
+    logger.info("🎉 训练结束！各指标的最佳模型已保存在: %s 目录下", SAVE_DIR)
 
     # 【新增 5】调用绘图函数
     plot_save_path = os.path.join(SAVE_DIR, "loss_curve.png")
@@ -308,7 +337,4 @@ def main():
 
 
 if __name__ == "__main__":
-    criterion_mse = nn.MSELoss()
-    criterion_dcca = DCCALoss()
-    lambda_c = 0.01  # 论文中的平衡权重 \lambda_C，通常取 0.01 到 0.1
     main()
