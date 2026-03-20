@@ -5,14 +5,24 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import warnings
+
+# 忽略所有 FutureWarning
+# warnings.filterwarnings("ignore", category=FutureWarning)
+
+# 或者更精确地只忽略包含 "custom_fwd" 或 "custom_bwd" 的警告
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.custom_fwd.*")
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.custom_bwd.*")
+
 # 导入自己写的模块
 from dataset.dataset import SatellitePVDataset
 from model.mymodel import MultiModalPVNet
 from utils.config import load_config, setup_logger, plot_metrics_curve, plot_loss_curve, set_seed, init_weights
 from utils.metrics import evaluate_metrics
 from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss
+from loss.optimizer import create_mamba_optimizer
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 # ================= 配置区域 (Hyperparameters) =================
 # 加载配置
@@ -30,7 +40,7 @@ logger = setup_logger(SAVE_DIR)
 
 # 训练参数
 BATCH_SIZE = 64
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 2e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
 WEIGHT_DECAY = 1e-3
@@ -210,12 +220,12 @@ def main():
     model.apply(init_weights)
     logger.info("✨ 模型权重初始化完成 (Xavier/Kaiming)")
 
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=0.01)
     # 2. 使用 OneCycleLR (自带 Warmup 和平滑余弦衰减)
     # max_lr 可以比原来稍微激进一点，比如 3e-4，因为有了 Warmup 保护
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=3e-4,
+        max_lr=LEARNING_RATE,
         epochs=NUM_EPOCHS,
         steps_per_epoch=len(train_loader),  # 必须传入每个 epoch 的 batch 数量
         pct_start=0.1,  # 前 10% 的时间 (即前 10 个 Epoch) 用于 Warmup 预热
