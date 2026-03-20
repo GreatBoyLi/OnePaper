@@ -106,11 +106,13 @@ if __name__ == "__main__":
     batch_size = 2
     seq_len = 16
 
-    dummy_imgs = torch.randn(batch_size, seq_len, 3, 96, 96)
-    dummy_nums = torch.randn(batch_size, seq_len, 10)
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    dummy_imgs = torch.randn(batch_size, seq_len, 3, 96, 96).to(DEVICE)
+    dummy_nums = torch.randn(batch_size, seq_len, 10).to(DEVICE)
 
     # 显式指定深度为 3
-    model = MultiModalPVNet(self_depth=3, cross_depth=3, output_seq_len=4)
+    model = MultiModalPVNet(self_depth=3, cross_depth=3, output_seq_len=4).to(DEVICE)
     model.eval()
 
     with torch.no_grad():

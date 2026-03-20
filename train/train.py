@@ -101,6 +101,10 @@ def train_one_epoch(model, loader, optimizer, device, scheduler):
         total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy
 
         total_loss.backward()
+
+        # 🛡️ 补丁：强行把梯度范数剪裁到 1.0 (这是 Mamba 训练的刚需！)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         optimizer.step()
 
         # ✅ 新增：每个 Batch 更新完权重后，微调一次学习率
