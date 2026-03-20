@@ -82,17 +82,6 @@ class MultiModalPVNet(nn.Module):
         for sa_block in self.ts_sa_layers:
             t_tokens = sa_block(t_tokens)
 
-        # # 🌟 截流点：在最高层（第 3 层）提取完美独立特征，送给 DCCA 计算正交约束！
-        # v_img = rearrange(v_tokens, 'b (t h w) c -> b t h w c', t=T, h=H_p, w=W_p)
-        # v_img = v_img[:, -1, :, :, :].permute(0, 3, 1, 2)
-        # v_img = F.interpolate(v_img, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
-        # v_img = self.v_to_hidden_map(v_img)
-        # v_feat = self.ricnn(v_img)  # -> (Batch, final_dim)
-        #
-        # t_feat = self.t_intermediate_head(t_tokens[:, -1, :])  # -> (Batch, final_dim)
-
-        # --- 3. Stage 2: 3 层早期交叉融合 (Deep Cross Attention) ---
-        # 此时的 t_tokens 变成了 fust_tokens，它将在 3 层网络中反复去视觉 v_tokens 里“淘宝”
         fused_tokens = t_tokens
         for cross_block in self.cross_attn_layers:
             fused_tokens = cross_block(x_q=fused_tokens, x_kv=v_tokens)
