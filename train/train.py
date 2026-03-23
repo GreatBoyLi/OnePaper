@@ -159,18 +159,29 @@ def validate(model, loader, device):
             # 🌟 3. 物理还原：将 CSI 转换为实际预测功率
             preds_power = preds_csi * y_clearsky
 
-            # 🌟 4. 使用还原后的【预测功率】和【真实功率 targets】计算 Loss
+            # 🌟 3. 分别计算三个子 Loss
+            # (A) Masked MSE (主损失)
             loss_mse = masked_mse_loss(preds_power, targets, zeniths)
 
+            # (B) Grad Loss (捕获爬坡趋势)
+            loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
+
+            # (C) Physics Loss (约束上限)
+            loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
+
+            # 🌟 4. 混合损失函数 (Total Loss)
+            # 使用配置区域定义的 ALPHA, BETA, GAMMA
+            total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy
+
             # 3. 物理后处理：创建夜晚掩码
-            # 如果天顶角 > 86°，说明太阳已落山或在地平线以下
-            night_mask = zeniths > 86
+            # 如果天顶角 > 88°，说明太阳已落山或在地平线以下
+            night_mask = zeniths > 88
 
             # 🌟 抹除夜晚的时段 (对 preds_power 操作)
             preds_power[night_mask] = 0.0
 
-            loss = loss_mse
-            running_loss += loss.item()
+
+            running_loss += total_loss.item()
 
             # 🌟 将还原并掩码后的【预测功率】存入列表，用于后续计算指标
             all_preds.append(preds_power.cpu())
@@ -223,6 +234,37 @@ def main():
     # 🌟 2. 在这里应用权重初始化
     model.apply(init_weights)
     logger.info("✨ 模型权重初始化完成 (Xavier/Kaiming)")
+
+    # ### 🌟 新增：加载预训练模型逻辑 ###
+    # 你可以在 config.yaml 中添加 pretrain_model_path，或者直接在这里指定路径
+    PRETRAINED_MODEL_PATH = config.get("pretrain_model_path", None)
+
+    start_epoch = 0  # 记录起始 epoch
+    if PRETRAINED_MODEL_PATH and os.path.exists(PRETRAINED_MODEL_PATH):
+        logger.info(f"📂 正在从 {PRETRAINED_MODEL_PATH} 加载预训练权重...")
+
+        # 加载权重字典
+        state_dict = torch.load(PRETRAINED_MODEL_PATH, map_location=DEVICE, weights_only=True)
+
+        # 加载到模型中
+        # strict=False 可以防止因为微调了模型结构（如增加了层）而导致的报错
+        model.load_state_dict(state_dict, strict=True)
+
+        # 如果你的文件名里存了 Epoch 数，也可以尝试解析它来继续计数
+        # 例如文件名是 "Epoch:25-best_rmse..."
+        try:
+            filename = os.path.basename(PRETRAINED_MODEL_PATH)
+            if "Epoch:" in filename:
+                start_epoch = int(filename.split("Epoch:")[1].split("-")[0])
+                logger.info(f"📈 检测到起始 Epoch: {start_epoch}")
+        except Exception:
+            pass
+
+        logger.info("✅ 预训练权重加载成功！")
+    else:
+        logger.info("🆕 未检测到预训练模型路径，将从零开始训练。")
+    # #################################
+
 
     optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=0.01)
     # 2. 使用 OneCycleLR (自带 Warmup 和平滑余弦衰减)

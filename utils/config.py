@@ -122,21 +122,33 @@ def set_seed(logger, seed=42):
 # ================= 2. 权重初始化 =================
 def init_weights(m):
     """
-    遍历模型的各个子模块，并根据不同类型进行初始化。
-    对于 Transformer 架构，通常使用 Xavier (Glorot) 初始化。
-    对于 CNN 架构，通常使用 Kaiming (He) 初始化。
+    精细化初始化：
+    1. 跳过官方 Mamba 模块（保留其内部优化的数学初始化）
+    2. 初始化 Transformer 的线性层 (Xavier)
+    3. 初始化 CNN 卷积层 (Kaiming)
     """
+    # 🌟 关键：如果是 mamba_ssm 官方模块，直接跳过，不进行二次初始化
+    classname = m.__class__.__name__
+    if "Mamba" in classname or "MambaBlock" in classname:
+        return
+
+    # --- 以下是你自定义层或 Transformer 层的初始化 ---
+
     if isinstance(m, nn.Linear):
-        # 线性层：Xavier 初始化（适合包含 Transformer 或全连接层的网络）
+        # 线性层：Xavier 初始化
         nn.init.xavier_uniform_(m.weight)
         if m.bias is not None:
             nn.init.zeros_(m.bias)
-    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv1d):
-        # 卷积层：Kaiming 初始化（配合 ReLU/GELU 效果好）
+
+    elif isinstance(m, (nn.Conv2d, nn.Conv1d)):
+        # 卷积层：Kaiming 初始化
         nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
         if m.bias is not None:
             nn.init.zeros_(m.bias)
-    elif isinstance(m, nn.LayerNorm) or isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
-        # 归一化层：权重设为 1，偏置设为 0
-        nn.init.ones_(m.weight)
-        nn.init.zeros_(m.bias)
+
+    elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d, nn.BatchNorm1d)):
+        # 归一化层
+        if m.weight is not None:
+            nn.init.ones_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)

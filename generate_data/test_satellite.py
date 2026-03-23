@@ -48,5 +48,5 @@ def validate_satellite_npy(npy_path):
 if __name__ == "__main__":
 
     # 替换成你刚刚生成的一个【白天】的实测文件路径
-    sample_file = "../data/crop_himawari/202001/01/NC_H08_20200101_0430_R21_FLDK.02401_02401_crop.npy"
+    sample_file = "../data/train/crop_himawari/202001/01/NC_H08_20200101_0430_R21_FLDK.02401_02401_crop.npy"
     validate_satellite_npy(sample_file)

@@ -2,7 +2,7 @@ import os
 import numpy as np
 
 # 设定你下载的那个文件的路径 (请修改这里)
-FILE_PATH = "../data/himawari_nc/202001/27/NC_H08_20200127_0000_R21_FLDK.02401_02401.nc"
+FILE_PATH = "../data/train/himawari_nc/202001/27/NC_H08_20200127_0000_R21_FLDK.02401_02401.nc"
 
 
 def inspect_nc_file(file_path):
