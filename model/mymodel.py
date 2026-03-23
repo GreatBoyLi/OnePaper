@@ -3,7 +3,7 @@ import torch.nn as nn
 from einops import rearrange
 
 from model.transformer import TransformerBlock, CrossTransformerBlock
-from model.visual_branch import RICNN
+from model.fused import GatedFusion
 
 
 class MultiModalPVNet(nn.Module):
@@ -15,42 +15,42 @@ class MultiModalPVNet(nn.Module):
         self.img_size = img_size
 
         # ================= 1. Token 提取器 =================
-        # 视觉 Patch 嵌入
         self.v_patch_embed = nn.Conv3d(visual_input_cha, transformer_dim, kernel_size=(1, patch_size, patch_size),
                                        stride=(1, patch_size, patch_size))
         num_patches = (img_size // patch_size) ** 2
         self.v_pos_embed = nn.Parameter(torch.randn(1, 16 * num_patches, transformer_dim))
 
-        # 时序 Linear 嵌入
         self.t_embed = nn.Linear(times_input_cha, transformer_dim)
         self.t_pos_embed = nn.Parameter(torch.randn(1, 16, transformer_dim))
 
-        # ================= 2. Stage 1: 多层独立自注意力 (深度特征提取) =================
-        # 视觉支路：连续过 3 层自注意力
+        # ================= 2. Stage 1: 多层独立自注意力 =================
         self.visual_sa_layers = nn.ModuleList([
             TransformerBlock(dim=transformer_dim, heads=heads, dim_head=dim_head, dropout=dropout)
             for _ in range(self_depth)
         ])
 
-        # 时序支路：连续过 3 层自注意力
         self.ts_sa_layers = nn.ModuleList([
             TransformerBlock(dim=transformer_dim, heads=heads, dim_head=dim_head, dropout=dropout)
             for _ in range(self_depth)
         ])
 
-        # 🛠️ DCCA 约束用的辅助提取头 (截留融合前的深层独立特征)
-        # self.v_to_hidden_map = nn.Conv2d(transformer_dim, ricnn_in_channels, kernel_size=1)
-        # self.ricnn = RICNN(in_channels=ricnn_in_channels, roi_size=roi_size, out_dim=final_dim)
-        # self.t_intermediate_head = nn.Sequential(nn.LayerNorm(transformer_dim), nn.Linear(transformer_dim, final_dim))
-
-        # ================= 3. Stage 2: 多层交叉融合 (深度跨模态查询) =================
-        # 让时间序列 (Q) 连续 3 次去跨模态查询云图 (K, V)，不断修正自己的特征
-        self.cross_attn_layers = nn.ModuleList([
+        # ================= 3. Stage 2: 多层交替交叉融合 (Co-Attention) =================
+        # TS 作为 Q, 查询 Vis 的层
+        self.ts_to_vis_layers = nn.ModuleList([
             CrossTransformerBlock(dim=transformer_dim, heads=heads, dim_head=dim_head, dropout=dropout)
             for _ in range(cross_depth)
         ])
 
-        # ================= 4. 最终单一预测头 =================
+        # Vis 作为 Q, 查询 TS 的层
+        self.vis_to_ts_layers = nn.ModuleList([
+            CrossTransformerBlock(dim=transformer_dim, heads=heads, dim_head=dim_head, dropout=dropout)
+            for _ in range(cross_depth)
+        ])
+
+        # ================= 4. 最终融合与预测头 =================
+        # 引入动态门控融合层
+        self.fusion_layer = GatedFusion(dim=transformer_dim)
+
         self.predictor = nn.Sequential(
             nn.LayerNorm(transformer_dim),
             nn.Linear(transformer_dim, 128),
@@ -72,61 +72,53 @@ class MultiModalPVNet(nn.Module):
         t_tokens = self.t_embed(x_numeric)
         t_tokens = t_tokens + self.t_pos_embed
 
-        # --- 2. Stage 1: 3 层深层自注意力 ---
-        # 视觉不断提炼云层的时空变化
+        # --- 2. Stage 1: 深层独立自注意力 ---
         for sa_block in self.visual_sa_layers:
             v_tokens = sa_block(v_tokens)
 
-        # 时序不断提炼发电量的历史趋势
         for sa_block in self.ts_sa_layers:
             t_tokens = sa_block(t_tokens)
 
-        # # 🌟 截流点：在最高层（第 3 层）提取完美独立特征，送给 DCCA 计算正交约束！
-        # v_img = rearrange(v_tokens, 'b (t h w) c -> b t h w c', t=T, h=H_p, w=W_p)
-        # v_img = v_img[:, -1, :, :, :].permute(0, 3, 1, 2)
-        # v_img = F.interpolate(v_img, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
-        # v_img = self.v_to_hidden_map(v_img)
-        # v_feat = self.ricnn(v_img)  # -> (Batch, final_dim)
-        #
-        # t_feat = self.t_intermediate_head(t_tokens[:, -1, :])  # -> (Batch, final_dim)
+        # --- 3. Stage 2: 早期交替交叉融合 (Alternating Co-Attention) ---
+        fused_t = t_tokens
+        fused_v = v_tokens
 
-        # --- 3. Stage 2: 3 层早期交叉融合 (Deep Cross Attention) ---
-        # 此时的 t_tokens 变成了 fust_tokens，它将在 3 层网络中反复去视觉 v_tokens 里“淘宝”
-        fused_tokens = t_tokens
-        for cross_block in self.cross_attn_layers:
-            fused_tokens = cross_block(x_q=fused_tokens, x_kv=v_tokens)
+        # 交替互相查询、共同进化
+        for i in range(len(self.ts_to_vis_layers)):
+            fused_t = self.ts_to_vis_layers[i](x_q=fused_t, x_kv=fused_v)
+            fused_v = self.vis_to_ts_layers[i](x_q=fused_v, x_kv=fused_t)
 
         # --- 4. 最终单一预测 ---
-        # 此时的 fused_tokens 已经是一个彻底吸收了 3 层云图动态的究极体序列
-        final_out = fused_tokens[:, -1, :]  # 取最后时刻的融合表征
+        # 提取时序的最后时刻特征
+        final_t = fused_t[:, -1, :]  # (Batch, transformer_dim)
+        # 提取视觉的全局平均特征
+        final_v = fused_v.mean(dim=1)  # (Batch, transformer_dim)
+
+        # 动态门控融合两股特征
+        final_out = self.fusion_layer(final_t, final_v)
+
         preds = self.predictor(final_out)
 
-        # 返回 preds 给回归 Loss，返回独立的 v_feat 和 t_feat 给 DCCA Loss
-        return preds  # , v_feat, t_feat
+        return preds
 
 
 # 测试块
 if __name__ == "__main__":
-    print("🚀 开始测试 [3层 SA + 3层 CA] 深层交叉融合网络...")
+    print("🚀 开始测试 [交替 Co-Attention + 门控融合] 网络...")
     batch_size = 2
     seq_len = 16
 
     dummy_imgs = torch.randn(batch_size, seq_len, 3, 96, 96)
     dummy_nums = torch.randn(batch_size, seq_len, 10)
 
-    # 显式指定深度为 3
     model = MultiModalPVNet(self_depth=3, cross_depth=3, output_seq_len=4)
     model.eval()
 
     with torch.no_grad():
-        # output, v_f, t_f = model(dummy_imgs, dummy_nums)
         output = model(dummy_imgs, dummy_nums)
 
     print(f"\n📥 输入云图 : {dummy_imgs.shape}")
     print(f"📥 输入数值 : {dummy_nums.shape}")
     print(f"📤 最终预测 : {output.shape} (预期为 Batch={batch_size}, 预测步数=4)")
-    # print(f"🧬 DCCA 独立视觉特征: {v_f.shape}")
-    # print(f"🧬 DCCA 独立时序特征: {t_f.shape}")
-
     if output.shape == (batch_size, 4):
-        print("\n✅ 测试成功！模型已具备深层 3x3 Attention 结构！")
+        print("\n✅ 门控网络测试成功！")

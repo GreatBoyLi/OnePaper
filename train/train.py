@@ -24,7 +24,6 @@ from loss.optimizer import create_mamba_optimizer
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-
 # ================= 配置区域 (Hyperparameters) =================
 # 加载配置
 config = load_config("../config/config.yaml")
@@ -44,7 +43,7 @@ BATCH_SIZE = 64
 LEARNING_RATE = 2e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
-WEIGHT_DECAY = 1e-3
+WEIGHT_DECAY = 1e-2
 DROPOUT = 0.3
 SELF_DEPTH = 3
 CROSS_DEPTH = 3
@@ -160,17 +159,28 @@ def validate(model, loader, device):
             # 🌟 3. 物理还原：将 CSI 转换为实际预测功率
             preds_power = preds_csi * y_clearsky
 
-            # 🌟 4. 使用还原后的【预测功率】和【真实功率 targets】计算 Loss
+            # 🌟 3. 分别计算三个子 Loss
+            # (A) Masked MSE (主损失)
             loss_mse = masked_mse_loss(preds_power, targets, zeniths)
 
+            # (B) Grad Loss (捕获爬坡趋势)
+            loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
+
+            # (C) Physics Loss (约束上限)
+            loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
+
+            # 🌟 4. 混合损失函数 (Total Loss)
+            # 使用配置区域定义的 ALPHA, BETA, GAMMA
+            total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy
+
             # 3. 物理后处理：创建夜晚掩码
-            # 如果天顶角 > 86°，说明太阳已落山或在地平线以下
-            night_mask = zeniths > 86
+            # 如果天顶角 > 88°，说明太阳已落山或在地平线以下
+            night_mask = zeniths > 88
 
             # 🌟 抹除夜晚的时段 (对 preds_power 操作)
             preds_power[night_mask] = 0.0
 
-            loss = loss_mse
+            loss = total_loss
             running_loss += loss.item()
 
             # 🌟 将还原并掩码后的【预测功率】存入列表，用于后续计算指标
@@ -225,7 +235,9 @@ def main():
     model.apply(init_weights)
     logger.info("✨ 模型权重初始化完成 (Xavier/Kaiming)")
 
-    optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=0.01)
+    optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # 使用 AdamW 优化器
+    # optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     # 2. 使用 OneCycleLR (自带 Warmup 和平滑余弦衰减)
     # max_lr 可以比原来稍微激进一点，比如 3e-4，因为有了 Warmup 保护
     scheduler = optim.lr_scheduler.OneCycleLR(

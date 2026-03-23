@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-def masked_mse_loss(preds, targets, zeniths, threshold=86.0):
+def masked_mse_loss(preds, targets, zeniths, threshold=88.0):
     """
     标准的 Masked MSE：只计算白天的误差，并除以白天的总点数。
     """
@@ -20,7 +20,7 @@ def masked_mse_loss(preds, targets, zeniths, threshold=86.0):
     return loss
 
 
-def gradient_rmse_loss(preds, targets, zeniths, threshold=86.0):
+def gradient_rmse_loss(preds, targets, zeniths, threshold=88.0):
     """
     爬坡损失 (Gradient/Variational Loss)：
     计算预测曲线和真实曲线一阶差分（变化率）的 RMSE。
@@ -47,7 +47,7 @@ def gradient_rmse_loss(preds, targets, zeniths, threshold=86.0):
     return torch.sqrt(loss + 1e-8)
 
 
-def physics_constraint_loss(preds, clearsky_limits, zeniths, threshold=86.0):
+def physics_constraint_loss(preds, clearsky_limits, zeniths, threshold=88.0):
     """
     物理约束损失：
     惩罚任何时刻【预测功率 > 理论晴空功率】的情况。
