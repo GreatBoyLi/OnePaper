@@ -22,7 +22,8 @@ from utils.metrics import evaluate_metrics
 from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss
 from loss.optimizer import create_mamba_optimizer
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 
 # ================= 配置区域 (Hyperparameters) =================
 # 加载配置

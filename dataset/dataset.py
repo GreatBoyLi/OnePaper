@@ -203,12 +203,12 @@ class SatellitePVDataset(Dataset):
         x_images = np.stack(final_images, axis=0)
 
         return {
-            'x_images': torch.from_numpy(x_images).float(),
-            'x_numeric': torch.from_numpy(x_numeric).float(),
-            'y_power': torch.from_numpy(y_power).float(),  # 真实功率 (Loss 评估备用)
-            'y_csi': torch.from_numpy(y_csi).float(),  # 真实CSI (主要预测目标)
-            'y_clear_sky_ghi': torch.from_numpy(y_clear_sky_ghi).float(),  # 未来晴空基准 (用于还原功率)
-            'y_zenith': torch.from_numpy(y_zenith_raw).float()  # 真实物理角度 (用于掩蔽黑夜 Loss)
+            'x_images': torch.from_numpy(x_images.copy()).float(),
+            'x_numeric': torch.from_numpy(x_numeric.copy()).float(),
+            'y_power': torch.from_numpy(y_power.copy()).float(),  # 真实功率 (Loss 评估备用)
+            'y_csi': torch.from_numpy(y_csi.copy()).float(),  # 真实CSI (主要预测目标)
+            'y_clear_sky_ghi': torch.from_numpy(y_clear_sky_ghi.copy()).float(),  # 未来晴空基准 (用于还原功率)
+            'y_zenith': torch.from_numpy(y_zenith_raw.copy()).float()  # 真实物理角度 (用于掩蔽黑夜 Loss)
         }
 
 
