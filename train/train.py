@@ -331,22 +331,22 @@ def main():
             model_to_save = model.module if dist.is_initialized() else model
 
             if current_rmse < best_rmse:
-                best_rmse = current_rmse;
+                best_rmse = current_rmse
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_rmse_{current_rmse:.4f}.pth"))
             if current_mae < best_mae:
-                best_mae = current_mae;
+                best_mae = current_mae
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_mae_{current_mae:.4f}.pth"))
             if current_mape < best_mape:
-                best_mape = current_mape;
+                best_mape = current_mape
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_mape_{current_mape:.2f}.pth"))
             if current_r > best_r:
-                best_r = current_r;
+                best_r = current_r
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_r_{current_r:.2f}.pth"))
