@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from model.transformer import TransformerBlock, CrossTransformerBlock
+# from model.transformer import TransformerBlock, CrossTransformerBlock
+from model.flashattn import TransformerBlock, CrossTransformerBlock
 from model.fused import GatedFusion
 
 
