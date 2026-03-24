@@ -50,10 +50,12 @@ CROSS_DEPTH = 3
 FINAL_DIM = 64
 TRANSFORMER_DIM = 128
 HEADS = 4
-ALPHA = 1.0  # Masked MSE 的权重 (主 Loss)
-BETA = 0.5  # Grad Loss (爬坡) 的权重 (通常设在 0.1~0.5)
-GAMMA = 0.1  # Physics Loss 的权重 (通常不需要太大，能约束住就行)
-LAMBDA_DCCA = 1e-3
+
+# 损失权重
+ALPHA = 1.0  # MSE (主目标不变)
+BETA = 1.0  # 由于去掉了 sqrt，变成了 Grad MSE，权重可以放心给 1.0 或 0.5
+GAMMA = 2.0  # 🌟 放大 20 倍！既然越界了，就狠狠惩罚，让 Phy 贡献达到 0.01 左右
+LAMBDA_DCCA = 1e-4  # 🌟 缩小 10 倍！让 DCCA 的初始贡献降到 0.016 左右 (占比 5%~10%)，做好辅助工作即可
 
 # 硬件设置
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
