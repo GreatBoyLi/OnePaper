@@ -28,8 +28,8 @@ VAL_CSV_PATH = config["val_file_paths"]["series_file"]
 VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 SAVE_DIR = config["pkg_path"]
 
-BATCH_SIZE = 64
-LEARNING_RATE = 2e-4
+BATCH_SIZE = 32
+LEARNING_RATE = 4e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
 WEIGHT_DECAY = 1e-2
