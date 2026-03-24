@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 
 def masked_mse_loss(preds, targets, zeniths, threshold=88.0):
     """
@@ -193,3 +195,61 @@ class PaperDCCALoss(nn.Module):
         # ==========================================
         # 因为优化器是求最小值，我们要最大化相关性，所以取负数 (公式 19 的逻辑)
         return -corr
+
+
+class NRDCCALoss(nn.Module):
+    """
+    NR-DCCA (Noise Regularization DCCA)
+    引入相关性不变特性 (Correlation Invariant Property)，防止模型坍塌与数值爆炸。
+    """
+
+    def __init__(self, lambd=5e-3, noise_std=0.05, nr_weight=1.0):
+        super(NRDCCALoss, self).__init__()
+        self.lambd = lambd  # 非对角线冗余消除系数
+        self.noise_std = noise_std  # 注入高斯噪声的标准差 (通常 0.01 ~ 0.1)
+        self.nr_weight = nr_weight  # 噪声正则化项的惩罚权重
+
+    def forward(self, H1, H2):
+        batch_size = H1.size(0)
+
+        # 🛡️ 极小 Batch 保护
+        if batch_size <= 1:
+            return torch.tensor(0.0, device=H1.device, requires_grad=True)
+
+        # 1. 特征标准化 (均值为0，方差为1)
+        H1_norm = (H1 - H1.mean(dim=0)) / (H1.std(dim=0, unbiased=False) + 1e-8)
+        H2_norm = (H2 - H2.mean(dim=0)) / (H2.std(dim=0, unbiased=False) + 1e-8)
+
+        # 2. 计算纯净特征的跨模态互相关矩阵 C -> 维度: (Dim, Dim)
+        C = torch.matmul(H1_norm.t(), H2_norm) / batch_size
+
+        # 3. 基础 Soft-DCCA 损失 (拉近对角线，推开非对角线)
+        c_diff = (C - torch.eye(C.size(0), device=C.device)).pow(2)
+        on_diag_loss = torch.diag(c_diff).sum()
+        off_diag_loss = c_diff.sum() - on_diag_loss
+        base_loss = on_diag_loss + self.lambd * off_diag_loss
+
+        # ==========================================
+        # 🌟 4. NR (Noise Regularization) 核心逻辑
+        # ==========================================
+        if self.nr_weight > 0:
+            # 给特征强行注入随机高斯噪声
+            noise_H1 = torch.randn_like(H1_norm) * self.noise_std
+            noise_H2 = torch.randn_like(H2_norm) * self.noise_std
+
+            H1_noisy = H1_norm + noise_H1
+            H2_noisy = H2_norm + noise_H2
+
+            # 计算注入噪声后的“污染”互相关矩阵
+            C_noisy = torch.matmul(H1_noisy.t(), H2_noisy) / batch_size
+
+            # NR 惩罚：强制网络学习到的相关性矩阵必须坚如磐石！
+            # 即使输入特征被噪声干扰，相关性矩阵 C 也不能发生崩塌 (MSE 约束)
+            nr_loss = F.mse_loss(C_noisy, C)
+
+            # 最终损失 = 基础对齐 + 强迫相关性抗噪
+            total_loss = base_loss + self.nr_weight * nr_loss
+        else:
+            total_loss = base_loss
+
+        return total_loss

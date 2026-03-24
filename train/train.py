@@ -19,7 +19,7 @@ from dataset.dataset import SatellitePVDataset
 from model.mymodel import MultiModalPVNet
 from utils.config import load_config, setup_logger, plot_metrics_curve, plot_loss_curve, set_seed, init_weights
 from utils.metrics import evaluate_metrics
-from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss
+from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss, NRDCCALoss
 from loss.optimizer import create_mamba_optimizer
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -53,6 +53,7 @@ HEADS = 4
 ALPHA = 1.0  # Masked MSE 的权重 (主 Loss)
 BETA = 0.5  # Grad Loss (爬坡) 的权重 (通常设在 0.1~0.5)
 GAMMA = 0.1  # Physics Loss 的权重 (通常不需要太大，能约束住就行)
+LAMBDA_DCCA = 1e-3
 
 # 硬件设置
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -60,12 +61,13 @@ logger.info(f"🚀 使用设备: {DEVICE}")
 
 
 # ============================================================
-def train_one_epoch(model, loader, optimizer, device, scheduler):
+def train_one_epoch(model, loader, optimizer, device, scheduler, dcca_criterion):
     model.train()
     running_loss = 0.0
     running_mse = 0.0
     running_grad = 0.0
     running_phy = 0.0
+    running_dcca = 0.0
 
     loop = tqdm(loader, desc="Training", leave=False)
 
@@ -78,7 +80,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler):
         optimizer.zero_grad()
 
         # 1. 模型输出是 CSI
-        preds_csi = model(imgs, nums)
+        preds_csi, v_feat, t_feat, t_attn_weights = model(imgs, nums)
 
         # 🌟 2. 拿到预测窗口对应的理论晴空功率 (确保 Dataset 里有返回这个字段)
         y_clearsky = batch['y_clear_sky_ghi'].to(device)
@@ -96,9 +98,12 @@ def train_one_epoch(model, loader, optimizer, device, scheduler):
         # (C) Physics Loss (约束上限)
         loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
 
-        # 🌟 4. 混合损失函数 (Total Loss)
-        # 使用配置区域定义的 ALPHA, BETA, GAMMA
-        total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy
+        # 🌟 计算 NR-DCCA 表征对齐损失
+        loss_dcca = dcca_criterion(v_feat, t_feat)
+
+        # 4. 混合损失
+        # 注意：DCCA 是特征层面的 loss，数值量级可能与 MSE 不同，通常给一个较小的系数
+        total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
 
         total_loss.backward()
 
@@ -115,13 +120,15 @@ def train_one_epoch(model, loader, optimizer, device, scheduler):
         running_mse += loss_mse.item()
         running_grad += loss_grad.item()
         running_phy += loss_phy.item()
+        running_dcca += loss_dcca.item()
 
         # tqdm 进度条显示详细 Loss
         loop.set_postfix(
             T=f"{total_loss.item():.4f}",
             M=f"{loss_mse.item():.4f}",
             G=f"{loss_grad.item():.4f}",
-            P=f"{loss_phy.item():.4f}"
+            P=f"{loss_phy.item():.4f}",
+            D=f"{loss_dcca.item():.4f}"
         )
 
     # 计算 Epoch 平均 Loss
@@ -249,6 +256,9 @@ def main():
         anneal_strategy='cos'  # 后续 90% 的时间进行余弦衰减
     )
 
+    # 实例化 NR-DCCA (建议权重不要太大，作为一个辅助约束)
+    dcca_criterion = NRDCCALoss(lambd=5e-3, noise_std=0.05, nr_weight=0.5).to(DEVICE)
+
     # 分别初始化四个指标的历史最佳记录
     # RMSE, MAE, MAPE 是越小越好，所以初始值设为正无穷大
     best_rmse = float('inf')
@@ -273,7 +283,7 @@ def main():
     logger.info("-" * 60)
 
     for epoch in range(NUM_EPOCHS):
-        train_loss = train_one_epoch(model, train_loader, optimizer, DEVICE, scheduler)
+        train_loss = train_one_epoch(model, train_loader, optimizer, DEVICE, scheduler, dcca_criterion)
         val_loss, val_metrics = validate(model, val_loader, DEVICE)
         logger.info(val_metrics)
         # 获取当前刚刚被降下来的学习率

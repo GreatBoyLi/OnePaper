@@ -4,7 +4,7 @@ from einops import rearrange
 
 # from model.transformer import TransformerBlock, CrossTransformerBlock
 from model.flashattn import TransformerBlock, CrossTransformerBlock
-from model.fused import GatedFusion
+from model.fused import GatedFusion, TemporalAttentionPooling
 
 
 class MultiModalPVNet(nn.Module):
@@ -35,6 +35,9 @@ class MultiModalPVNet(nn.Module):
             for _ in range(self_depth)
         ])
 
+        # 🌟 新增：实例化时序注意力池化层，维度对齐 transformer_dim
+        self.temporal_pooling = TemporalAttentionPooling(dim=transformer_dim)
+
         # ================= 3. Stage 2: 多层交替交叉融合 (Co-Attention) =================
         # TS 作为 Q, 查询 Vis 的层
         self.ts_to_vis_layers = nn.ModuleList([
@@ -49,6 +52,8 @@ class MultiModalPVNet(nn.Module):
         ])
 
         # ================= 4. 最终融合与预测头 =================
+        # 🌟 新增：专门用于 Cross-Attention 之后，最终预测前的时序注意力池化
+        self.final_temporal_pooling = TemporalAttentionPooling(dim=transformer_dim)
         # 引入动态门控融合层
         self.fusion_layer = GatedFusion(dim=transformer_dim)
 
@@ -80,6 +85,16 @@ class MultiModalPVNet(nn.Module):
         for sa_block in self.ts_sa_layers:
             t_tokens = sa_block(t_tokens)
 
+        # ==========================================================
+        # 🧨 关键截留点：给 DCCA 准备独立的高阶特征
+        # ==========================================================
+        # 视觉特征依然可以使用均值池化 (代表全局云图状态)
+        v_feat_for_dcca = v_tokens.mean(dim=1)  # -> (Batch, Dim)
+
+        # 🌟 时序特征升级为：动态注意力池化
+        # t_attn_weights 保存了网络对这 16 个时刻的关注度分配
+        t_feat_for_dcca, t_attn_weights = self.temporal_pooling(t_tokens)  # -> (Batch, Dim)
+
         # --- 3. Stage 2: 早期交替交叉融合 (Alternating Co-Attention) ---
         fused_t = t_tokens
         fused_v = v_tokens
@@ -90,17 +105,18 @@ class MultiModalPVNet(nn.Module):
             fused_v = self.vis_to_ts_layers[i](x_q=fused_v, x_kv=fused_t)
 
         # --- 4. 最终单一预测 ---
-        # 提取时序的最后时刻特征
-        final_t = fused_t[:, -1, :]  # (Batch, transformer_dim)
-        # 提取视觉的全局平均特征
-        final_v = fused_v.mean(dim=1)  # (Batch, transformer_dim)
+        # 🌟 升级：不再只取最后一刻，而是通过注意力机制浓缩整个融合后的时间序列
+        final_t, final_t_attn_weights = self.final_temporal_pooling(fused_t)  # -> (Batch, transformer_dim)
+
+        # 提取视觉的全局平均特征 (视觉通常用全局均值即可，代表整体天空状态)
+        final_v = fused_v.mean(dim=1)  # -> (Batch, transformer_dim)
 
         # 动态门控融合两股特征
         final_out = self.fusion_layer(final_t, final_v)
 
         preds = self.predictor(final_out)
 
-        return preds
+        return preds, v_feat_for_dcca, t_feat_for_dcca, t_attn_weights
 
 
 # 测试块
@@ -120,6 +136,6 @@ if __name__ == "__main__":
 
     print(f"\n📥 输入云图 : {dummy_imgs.shape}")
     print(f"📥 输入数值 : {dummy_nums.shape}")
-    print(f"📤 最终预测 : {output.shape} (预期为 Batch={batch_size}, 预测步数=4)")
-    if output.shape == (batch_size, 4):
+    print(f"📤 最终预测 : {output[0].shape} (预期为 Batch={batch_size}, 预测步数=4)")
+    if output[0].shape == (batch_size, 4):
         print("\n✅ 门控网络测试成功！")
