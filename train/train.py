@@ -40,6 +40,7 @@ FINAL_DIM = 64
 TRANSFORMER_DIM = 128
 HEADS = 4
 
+
 # Loss 权重
 # ALPHA = 1.0  # MSE (主目标不变)
 # BETA = 1.0  # 由于去掉了 sqrt，变成了 Grad MSE，权重可以放心给 1.0 或 0.5
@@ -334,22 +335,26 @@ def main():
                 best_rmse = current_rmse
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
-                           os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_rmse_{current_rmse:.4f}.pth"))
+                           os.path.join(SAVE_DIR,
+                                        f"Epoch:{epoch + 1}-best_mae_model-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
             if current_mae < best_mae:
                 best_mae = current_mae
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
-                           os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_mae_{current_mae:.4f}.pth"))
+                           os.path.join(SAVE_DIR,
+                                        f"Epoch:{epoch + 1}-best_mae_model-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
             if current_mape < best_mape:
                 best_mape = current_mape
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
-                           os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_mape_{current_mape:.2f}.pth"))
+                           os.path.join(SAVE_DIR,
+                                        f"Epoch:{epoch + 1}-best_mae_model-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
             if current_r > best_r:
                 best_r = current_r
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
-                           os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_r_{current_r:.2f}.pth"))
+                           os.path.join(SAVE_DIR,
+                                        f"Epoch:{epoch + 1}-best_mae_model-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
 
             if any_improvement:
                 patience_counter = 0
