@@ -142,7 +142,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler, dcca_criterion)
     return avg_total_loss
 
 
-def validate(model, loader, device):
+def validate(model, loader, device, dcca_criterion):
     model.eval()
     running_loss = 0.0
 
@@ -158,7 +158,7 @@ def validate(model, loader, device):
             zeniths = batch['y_zenith'].to(device)  # 🌟 拿到天顶角
 
             # 1. 模型预测 CSI
-            preds_csi = model(imgs, nums)
+            preds_csi, v_feat, t_feat, t_attn_weights = model(imgs, nums)
 
             # 🌟 2. 拿到预测窗口对应的理论晴空功率 (确保 Dataset 里有返回这个字段)
             y_clearsky = batch['y_clear_sky_ghi'].to(device)
@@ -176,9 +176,12 @@ def validate(model, loader, device):
             # (C) Physics Loss (约束上限)
             loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
 
-            # 🌟 4. 混合损失函数 (Total Loss)
-            # 使用配置区域定义的 ALPHA, BETA, GAMMA
-            total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy
+            # 🌟 计算 NR-DCCA 表征对齐损失
+            loss_dcca = dcca_criterion(v_feat, t_feat)
+
+            # 4. 混合损失
+            # 注意：DCCA 是特征层面的 loss，数值量级可能与 MSE 不同，通常给一个较小的系数
+            total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
 
             # 3. 物理后处理：创建夜晚掩码
             # 如果天顶角 > 88°，说明太阳已落山或在地平线以下
@@ -284,7 +287,7 @@ def main():
 
     for epoch in range(NUM_EPOCHS):
         train_loss = train_one_epoch(model, train_loader, optimizer, DEVICE, scheduler, dcca_criterion)
-        val_loss, val_metrics = validate(model, val_loader, DEVICE)
+        val_loss, val_metrics = validate(model, val_loader, DEVICE, dcca_criterion)
         logger.info(val_metrics)
         # 获取当前刚刚被降下来的学习率
         current_lr = optimizer.param_groups[0]['lr']
