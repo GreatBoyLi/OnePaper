@@ -45,8 +45,9 @@ def gradient_rmse_loss(preds, targets, zeniths, threshold=88.0):
     masked_diff_elements = diff_mse_elements * daytime_mask
     loss = masked_diff_elements.sum() / (daytime_mask.sum() + 1e-8)
 
-    # 5. 开方得到 RMSE 量级，方便与主 Loss 融合
-    return torch.sqrt(loss + 1e-8)
+    # # 5. 开方得到 RMSE 量级，方便与主 Loss 融合
+    # return torch.sqrt(loss + 1e-8)
+    return loss
 
 
 def physics_constraint_loss(preds, clearsky_limits, zeniths, threshold=88.0):
@@ -253,3 +254,28 @@ class NRDCCALoss(nn.Module):
             total_loss = base_loss
 
         return total_loss
+
+
+# ================= 自适应权重模块 =================
+class AdaptiveLossWeighter(nn.Module):
+    """基于同方差不确定性的自适应多任务权重模块"""
+
+    def __init__(self, num_losses=4):
+        super(AdaptiveLossWeighter, self).__init__()
+        # 初始化 4 个可学习的对数方差参数 s_i
+        # 初始值为 0，意味着初始权重 exp(0) = 1.0
+        self.log_vars = nn.Parameter(torch.zeros(num_losses))
+
+    def forward(self, losses):
+        """losses: 包含多个标量 loss 的列表"""
+        total_loss = 0
+        for i, loss in enumerate(losses):
+            # 乘以自适应权重 exp(-s_i)，并加上正则项 s_i
+            precision = torch.exp(-self.log_vars[i])
+            total_loss += loss * precision + self.log_vars[i]
+        return total_loss
+
+    def get_current_weights(self):
+        """获取当前实际生效的权重值 (用于日志打印)"""
+        with torch.no_grad():
+            return torch.exp(-self.log_vars).cpu().tolist()

@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore", message=".*torch.cuda.amp.custom_bwd.*")
 from dataset.dataset import SatellitePVDataset
 from model.mymodel import MultiModalPVNet
 from utils.config import load_config, setup_logger, plot_metrics_curve, plot_loss_curve, set_seed, init_weights
-from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss, NRDCCALoss
+from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss, NRDCCALoss, AdaptiveLossWeighter
 from loss.optimizer import create_mamba_optimizer
 
 # ================= 配置区域 (Hyperparameters) =================
@@ -28,7 +28,7 @@ VAL_CSV_PATH = config["val_file_paths"]["series_file"]
 VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 SAVE_DIR = config["pkg_path"]
 
-BATCH_SIZE = 32
+BATCH_SIZE = 8
 LEARNING_RATE = 4e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
@@ -41,15 +41,14 @@ TRANSFORMER_DIM = 128
 HEADS = 4
 
 # Loss 权重
-ALPHA = 1.0  # Masked MSE
-BETA = 0.5  # Grad Loss
-GAMMA = 0.1  # Physics Loss
-LAMBDA_DCCA = 1e-3  # NR-DCCA
+# ALPHA = 1.0  # MSE (主目标不变)
+# BETA = 1.0  # 由于去掉了 sqrt，变成了 Grad MSE，权重可以放心给 1.0 或 0.5
+# GAMMA = 2.0  # 🌟 放大 20 倍！既然越界了，就狠狠惩罚，让 Phy 贡献达到 0.01 左右
+# LAMBDA_DCCA = 1e-4  # 🌟 缩小 10 倍！让 DCCA 的初始贡献降到 0.016 左右 (占比 5%~10%)，做好辅助工作即可
 
 
 # ================= 分布式初始化 =================
 def init_ddp():
-    """初始化分布式环境 (自适应单卡/多卡)"""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ['WORLD_SIZE'])
@@ -58,16 +57,15 @@ def init_ddp():
         torch.cuda.set_device(local_rank)
         return rank, world_size, local_rank
     else:
-        # 如果直接使用 python train.py 运行，则返回单卡模式的默认值
         return 0, 1, 0
 
 
 # ================= 训练与验证逻辑 =================
-def train_one_epoch(model, loader, optimizer, device, scheduler, dcca_criterion, rank):
+def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, dcca_criterion, rank):
     model.train()
+    loss_weighter.train()  # 确保权重模块处于训练模式
     running_loss = torch.tensor(0.0).to(device)
 
-    # 只有主进程 (rank 0) 显示进度条
     loop = tqdm(loader, desc="Training", leave=False, disable=(rank != 0))
 
     for batch in loop:
@@ -83,15 +81,19 @@ def train_one_epoch(model, loader, optimizer, device, scheduler, dcca_criterion,
         preds_csi, v_feat, t_feat, _ = model(imgs, nums)
         preds_power = preds_csi * y_clearsky
 
-        # 计算 Loss
+        # 计算各个基础 Loss
         loss_mse = masked_mse_loss(preds_power, targets, zeniths)
         loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
         loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
         loss_dcca = dcca_criterion(v_feat, t_feat)
 
-        total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
+        # 🌟 使用自适应权重模块融合 Loss
+        losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
+        total_loss = loss_weighter(losses)
 
         total_loss.backward()
+
+        # 裁剪模型参数梯度 (不对 loss_weighter 裁剪)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
@@ -100,12 +102,18 @@ def train_one_epoch(model, loader, optimizer, device, scheduler, dcca_criterion,
         running_loss += total_loss.detach()
 
         if rank == 0:
+            # 动态获取当前的自适应权重 (兼容 DDP)
+            lw_module = loss_weighter.module if dist.is_initialized() else loss_weighter
+            cur_weights = lw_module.get_current_weights()
+
             loop.set_postfix(
                 Loss=f"{total_loss.item():.4f}",
-                LR=f"{optimizer.param_groups[0]['lr']:.2e}"
+                W_M=f"{cur_weights[0]:.4f}",
+                W_G=f"{cur_weights[1]:.4f}",
+                W_P=f"{cur_weights[2]:.4f}",
+                W_D=f"{cur_weights[3]:.4f}"  # DCCA 权重可能很小，多保留几位
             )
 
-    # 🌟 [保护壳] 如果是多卡，则汇总各卡的 Loss；单卡直接除以 1
     if dist.is_initialized():
         dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
         world_size = dist.get_world_size()
@@ -116,17 +124,15 @@ def train_one_epoch(model, loader, optimizer, device, scheduler, dcca_criterion,
     return avg_total_loss
 
 
-def validate_distributed(model, loader, device, dcca_criterion, rank):
+def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, rank):
     model.eval()
+    loss_weighter.eval()
 
-    # 初始化累加器
     sum_loss = torch.tensor(0.0).to(device)
     total_count = torch.tensor(0.0).to(device)
-
     sum_se = torch.tensor(0.0).to(device)
     sum_ae = torch.tensor(0.0).to(device)
     sum_ape = torch.tensor(0.0).to(device)
-
     sum_x = torch.tensor(0.0).to(device)
     sum_y = torch.tensor(0.0).to(device)
     sum_xy = torch.tensor(0.0).to(device)
@@ -149,14 +155,15 @@ def validate_distributed(model, loader, device, dcca_criterion, rank):
             loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
             loss_dcca = dcca_criterion(v_feat, t_feat)
 
-            total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
+            # 🌟 验证集同样使用自适应权重模块计算整体 Loss
+            losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
+            total_loss = loss_weighter(losses)
             sum_loss += total_loss.detach()
 
             night_mask = zeniths > 88
             preds_power[night_mask] = 0.0
 
             error = preds_power - targets
-
             sum_se += torch.sum(error ** 2)
             sum_ae += torch.sum(torch.abs(error))
 
@@ -172,7 +179,6 @@ def validate_distributed(model, loader, device, dcca_criterion, rank):
 
             total_count += targets.numel()
 
-    # 🌟 [保护壳] 仅在多卡环境下执行分布式求和同步
     if dist.is_initialized():
         dist.all_reduce(sum_loss, op=dist.ReduceOp.SUM)
         dist.all_reduce(total_count, op=dist.ReduceOp.SUM)
@@ -193,7 +199,6 @@ def validate_distributed(model, loader, device, dcca_criterion, rank):
 
     if rank == 0:
         N = total_count.item()
-
         final_rmse = math.sqrt(sum_se.item() / N)
         final_mae = sum_ae.item() / N
         final_mape = (sum_ape.item() / N) * 100.0
@@ -216,7 +221,6 @@ def validate_distributed(model, loader, device, dcca_criterion, rank):
 
 # ================= 主函数 =================
 def main():
-    # 1. 初始化
     rank, world_size, local_rank = init_ddp()
     DEVICE = torch.device(f"cuda:{local_rank}")
 
@@ -227,60 +231,53 @@ def main():
         logger = setup_logger(SAVE_DIR)
         set_seed(logger, 42)
         if dist.is_initialized():
-            logger.info(f"🚀 启动分布式训练 | World Size: {world_size} | 设备: {DEVICE}")
+            logger.info(f"🚀 启动分布式训练 (自适应权重版) | World Size: {world_size} | 设备: {DEVICE}")
         else:
-            logger.info(f"🚀 启动单卡直通训练 | 设备: {DEVICE}")
+            logger.info(f"🚀 启动单卡直通训练 (自适应权重版) | 设备: {DEVICE}")
 
-    # 2. 数据集加载
-    train_dataset = SatellitePVDataset(TRAIN_CSV_PATH, TRAIN_SAT_DIR, mode="train")
-    val_dataset = SatellitePVDataset(VAL_CSV_PATH, VAL_SAT_DIR, mode="val")
-
-    # 🌟 [保护壳] 依据是否分布式，决定是否使用 DistributedSampler
     if dist.is_initialized():
+        train_dataset = SatellitePVDataset(TRAIN_CSV_PATH, TRAIN_SAT_DIR, mode="train")
+        val_dataset = SatellitePVDataset(VAL_CSV_PATH, VAL_SAT_DIR, mode="val")
         train_sampler = DistributedSampler(train_dataset, shuffle=True)
         val_sampler = DistributedSampler(val_dataset, shuffle=False)
-        train_shuffle = False  # 使用了 Sampler，DataLoader 就不能自己 shuffle
+        train_shuffle = False
     else:
+        train_dataset = SatellitePVDataset(TRAIN_CSV_PATH, TRAIN_SAT_DIR, mode="train")
+        val_dataset = SatellitePVDataset(VAL_CSV_PATH, VAL_SAT_DIR, mode="val")
         train_sampler = None
         val_sampler = None
-        train_shuffle = True  # 单卡模式下靠 DataLoader 自己 shuffle
+        train_shuffle = True
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler, shuffle=train_shuffle,
                               num_workers=4, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, sampler=val_sampler, shuffle=False, num_workers=4)
 
-    if rank == 0:
-        logger.info(f"✅ 数据集加载完成: 训练集 {len(train_dataset)} 样本, 验证集 {len(val_dataset)} 样本")
-
-    # 3. 构建模型
+    # 1. 构建主模型
     model = MultiModalPVNet(
-        final_dim=FINAL_DIM,
-        transformer_dim=TRANSFORMER_DIM,
-        heads=HEADS,
-        self_depth=SELF_DEPTH,
-        cross_depth=CROSS_DEPTH,
-        output_seq_len=4,
-        dropout=DROPOUT
+        final_dim=FINAL_DIM, transformer_dim=TRANSFORMER_DIM, heads=HEADS,
+        self_depth=SELF_DEPTH, cross_depth=CROSS_DEPTH, output_seq_len=4, dropout=DROPOUT
     ).to(DEVICE)
     model.apply(init_weights)
 
-    # 🌟 [保护壳] 如果是多卡，将模型包裹进 DDP
+    # 🌟 2. 构建自适应权重模块
+    loss_weighter = AdaptiveLossWeighter(num_losses=4).to(DEVICE)
+
     if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+        # 权重模块也需要 DDP 同步
+        loss_weighter = DDP(loss_weighter, device_ids=[local_rank], output_device=local_rank)
 
-    # 4. 优化器与辅助 Loss
+    # 🌟 3. 将权重模块的参数也放进优化器 (给予稍高的学习率帮助其快速调整)
     optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=LEARNING_RATE,
-        epochs=NUM_EPOCHS,
-        steps_per_epoch=len(train_loader),
-        pct_start=0.1,
-        anneal_strategy='cos'
-    )
-    dcca_criterion = NRDCCALoss(lambd=LAMBDA_DCCA, noise_std=0.05, nr_weight=0.5).to(DEVICE)
+    optimizer.add_param_group({'params': loss_weighter.parameters(), 'lr': LEARNING_RATE * 5})
 
-    # 5. 初始化历史记录
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=LEARNING_RATE, epochs=NUM_EPOCHS,
+        steps_per_epoch=len(train_loader), pct_start=0.1, anneal_strategy='cos'
+    )
+
+    dcca_criterion = NRDCCALoss(lambd=1e-3, noise_std=0.05, nr_weight=0.5).to(DEVICE)
+
     best_rmse = float('inf')
     best_mae = float('inf')
     best_mape = float('inf')
@@ -295,13 +292,14 @@ def main():
         logger.info("-" * 60)
         logger.info(f"🔥 开始训练 (Epochs: {NUM_EPOCHS})")
 
-    # ================= 开始 Epoch 循环 =================
     for epoch in range(NUM_EPOCHS):
         if dist.is_initialized():
             train_sampler.set_epoch(epoch)
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, DEVICE, scheduler, dcca_criterion, rank)
-        val_loss, val_metrics = validate_distributed(model, val_loader, DEVICE, dcca_criterion, rank)
+        # 传入 loss_weighter
+        train_loss = train_one_epoch(model, loss_weighter, train_loader, optimizer, DEVICE, scheduler, dcca_criterion,
+                                     rank)
+        val_loss, val_metrics = validate_distributed(model, loss_weighter, val_loader, DEVICE, dcca_criterion, rank)
 
         if rank == 0:
             current_lr = optimizer.param_groups[0]['lr']
@@ -318,14 +316,18 @@ def main():
             mape_hist.append(current_mape)
             r_hist.append(current_r)
 
+            # 获取并打印当前权重
+            lw_module = loss_weighter.module if dist.is_initialized() else loss_weighter
+            cur_weights = lw_module.get_current_weights()
+
             logger.info(
-                f"Epoch [{epoch + 1}/{NUM_EPOCHS}] | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | LR: {current_lr:.2e}")
+                f"Epoch [{epoch + 1}/{NUM_EPOCHS}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {current_lr:.2e}")
             logger.info(
                 f"   => RMSE: {current_rmse:.4f} | MAE: {current_mae:.4f} | MAPE: {current_mape:.2f}% | R: {current_r:.2f}%")
+            logger.info(
+                f"   => 动态权重: [MSE:{cur_weights[0]:.2f}, Grad:{cur_weights[1]:.2f}, Phy:{cur_weights[2]:.2f}, DCCA:{cur_weights[3]:.4f}]")
 
             any_improvement = False
-
-            # 🌟 [保护壳] 判断保存哪个模型：如果是 DDP 包裹的，保存 model.module；否则直接保存 model
             model_to_save = model.module if dist.is_initialized() else model
 
             if current_rmse < best_rmse:
@@ -333,28 +335,21 @@ def main():
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_rmse_{current_rmse:.4f}.pth"))
-                logger.info(f"   ⭐ [RMSE 冠军] 创新低: {best_rmse:.4f}")
-
             if current_mae < best_mae:
                 best_mae = current_mae;
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_mae_{current_mae:.4f}.pth"))
-                logger.info(f"   ⭐ [MAE  冠军] 创新低: {best_mae:.4f}")
-
             if current_mape < best_mape:
                 best_mape = current_mape;
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_mape_{current_mape:.2f}.pth"))
-                logger.info(f"   ⭐ [MAPE 冠军] 创新低: {best_mape:.2f}%")
-
             if current_r > best_r:
                 best_r = current_r;
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR, f"Epoch_{epoch + 1}_best_r_{current_r:.2f}.pth"))
-                logger.info(f"   🚀 [R 相关性冠军] 创新高: {best_r:.2f}%")
 
             if any_improvement:
                 patience_counter = 0
@@ -363,21 +358,18 @@ def main():
                 logger.info(f"   ⏳ 所有四项指标均未提升 ({patience_counter}/{PATIENCE})")
 
             if patience_counter >= PATIENCE:
-                logger.info(f"🛑 触发早停机制，停止于 Epoch {epoch + 1}")
                 early_stop_signal = torch.tensor(1.0).to(DEVICE)
             else:
                 early_stop_signal = torch.tensor(0.0).to(DEVICE)
         else:
             early_stop_signal = torch.tensor(0.0).to(DEVICE)
 
-        # 🌟 [保护壳] 早停信号广播也仅在多卡环境进行
         if dist.is_initialized():
             dist.all_reduce(early_stop_signal, op=dist.ReduceOp.SUM)
-
         if early_stop_signal.item() > 0:
+            if rank == 0: logger.info(f"🛑 触发早停机制，停止于 Epoch {epoch + 1}")
             break
 
-    # ================= 训练结束绘图 =================
     if rank == 0:
         logger.info("-" * 60)
         logger.info("🎉 训练结束！开始绘制并保存图表...")
