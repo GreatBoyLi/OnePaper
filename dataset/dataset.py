@@ -19,6 +19,28 @@ class SatellitePVDataset(Dataset):
         self.data = pd.read_csv(csv_path, parse_dates=True, index_col=0)
         self.data = self.data.sort_index()
 
+        # ====================================================================
+        # 🌟 新增：剔除包含空值的行 (直接利用你下方的时间连续性校验来避免切出断层样本)
+        # ====================================================================
+        check_cols = [
+            'Active_Power',
+            'Global_Horizontal_Radiation',
+            'Weather_Temperature_Celsius',
+            'Weather_Relative_Humidity',
+            'Power_Norm',
+            'CSI'
+        ]
+        # 防止有些列名大小写不一致或不存在，先做个过滤
+        valid_check_cols = [col for col in check_cols if col in self.data.columns]
+
+        len_before = len(self.data)
+        # 只要这几列中有任何一个是 NaN，就把这一整行删掉
+        self.data = self.data.dropna(subset=valid_check_cols)
+        len_after = len(self.data)
+        if len_before != len_after:
+            print(f"[{mode}] 🧹 数据清洗: 剔除了 {len_before - len_after} 行包含空值(NaN)的记录。")
+        # ====================================================================
+
         # 2. 时间序列的正余弦周期性编码 (捕捉日夜与季节周期规律)
         day_of_year = self.data.index.dayofyear
         minute_of_day = self.data.index.hour * 60 + self.data.index.minute
