@@ -28,8 +28,8 @@ VAL_CSV_PATH = config["val_file_paths"]["series_file"]
 VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 SAVE_DIR = config["pkg_path"]
 
-BATCH_SIZE = 8
-LEARNING_RATE = 4e-4
+BATCH_SIZE = 64
+LEARNING_RATE = 2e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
 WEIGHT_DECAY = 1e-2
@@ -326,7 +326,7 @@ def main():
             logger.info(
                 f"   => RMSE: {current_rmse:.4f} | MAE: {current_mae:.4f} | MAPE: {current_mape:.2f}% | R: {current_r:.2f}%")
             logger.info(
-                f"   => 动态权重: [MSE:{cur_weights[0]:.2f}, Grad:{cur_weights[1]:.2f}, Phy:{cur_weights[2]:.2f}, DCCA:{cur_weights[3]:.4f}]")
+                f"   => 动态权重: [MSE:{cur_weights[0]:.4f}, Grad:{cur_weights[1]:.4f}, Phy:{cur_weights[2]:.4f}, DCCA:{cur_weights[3]:.4f}]")
 
             any_improvement = False
             model_to_save = model.module if dist.is_initialized() else model
@@ -336,25 +336,25 @@ def main():
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR,
-                                        f"Epoch:{epoch + 1}-best_mae_model-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
+                                        f"Epoch:{epoch + 1}-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
             if current_mae < best_mae:
                 best_mae = current_mae
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR,
-                                        f"Epoch:{epoch + 1}-best_mae_model-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
+                                        f"Epoch:{epoch + 1}-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
             if current_mape < best_mape:
                 best_mape = current_mape
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR,
-                                        f"Epoch:{epoch + 1}-best_mae_model-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
+                                        f"Epoch:{epoch + 1}-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
             if current_r > best_r:
                 best_r = current_r
                 any_improvement = True
                 torch.save(model_to_save.state_dict(),
                            os.path.join(SAVE_DIR,
-                                        f"Epoch:{epoch + 1}-best_mae_model-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
+                                        f"Epoch:{epoch + 1}-RMSE:{current_rmse:.4f}-MAE:{current_mae:.4f}-MAPE:{current_mape:.2f}%-R:{current_r:.2f}%.pth"))
 
             if any_improvement:
                 patience_counter = 0
