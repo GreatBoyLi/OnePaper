@@ -38,9 +38,9 @@ statellite:
 # 4. 要处理的时间
 train_dates:
   start_date: "2020-01-01"
-  end_date: "2021-01-31" #"2022-10-08"
+  end_date: "2021-07-15"
 
 val_dates:
-  start_date: "2021-02-01"
-  end_date: "2021-02-21" #"2022-10-08"
+  start_date: "2021-07-16"
+  end_date: "2021-08-12"
 
