@@ -41,7 +41,7 @@ TRANSFORMER_DIM = 128
 HEADS = 4
 
 # 🌟 总开关：是否开启自适应动态权重
-AUTO_LOSS = False
+AUTO_LOSS = True
 
 # 固定 Loss 权重 (当 AUTO_LOSS = False 时生效)
 ALPHA = 1.0  # MSE
@@ -147,6 +147,7 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
     sum_se = torch.tensor(0.0).to(device)
     sum_ae = torch.tensor(0.0).to(device)
     sum_ape = torch.tensor(0.0).to(device)
+    sum_mape_count = torch.tensor(0.0).to(device)  # 🌟 新增：专门记录大于阈值的点数
     sum_x = torch.tensor(0.0).to(device)
     sum_y = torch.tensor(0.0).to(device)
     sum_xy = torch.tensor(0.0).to(device)
@@ -185,9 +186,16 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
             sum_se += torch.sum(error ** 2)
             sum_ae += torch.sum(torch.abs(error))
 
-            epsilon = 1e-4
-            safe_targets = torch.where(torch.abs(targets) < epsilon, torch.full_like(targets, epsilon), targets)
-            sum_ape += torch.sum(torch.abs(error / safe_targets))
+            # ========= 修改 MAPE 的计算方式 =========
+            # 设定阈值：例如真实功率大于 0.03 (即装机容量的 3%) 时，才计算 MAPE
+            # 这可以完美避开清晨、黄昏和深夜的除零/除极小值爆炸问题
+            THRESHOLD = 0.03
+            valid_mask = targets > THRESHOLD
+
+            if valid_mask.sum() > 0:
+                sum_ape += torch.sum(torch.abs(error[valid_mask] / targets[valid_mask]))
+
+            sum_mape_count += valid_mask.sum()
 
             sum_x += torch.sum(preds_power)
             sum_y += torch.sum(targets)
@@ -203,6 +211,7 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
         dist.all_reduce(sum_se, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_ae, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_ape, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_mape_count, op=dist.ReduceOp.SUM)  # 🌟 新增同步
         dist.all_reduce(sum_x, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_y, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_xy, op=dist.ReduceOp.SUM)
@@ -219,7 +228,9 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
         N = total_count.item()
         final_rmse = math.sqrt(sum_se.item() / N)
         final_mae = sum_ae.item() / N
-        final_mape = (sum_ape.item() / N) * 100.0
+        # 🌟 使用过滤后的点数作为分母，防止除 0
+        valid_N = sum_mape_count.item()
+        final_mape = (sum_ape.item() / valid_N) * 100.0 if valid_N > 0 else 0.0
 
         numerator = N * sum_xy.item() - (sum_x.item() * sum_y.item())
         denominator = math.sqrt(max(N * sum_x2.item() - sum_x.item() ** 2, 1e-8)) * \
