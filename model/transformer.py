@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from model.binaryatten import SpatiotemporalBinaryAttention
+
 
 # ==========================================
 # 1. 新核心：O(N) 复杂度的线性注意力机制
@@ -40,10 +42,22 @@ class TransformerBlock(nn.Module):
     标准的 Pre-Norm Transformer 编码器块
     """
 
-    def __init__(self, dim, heads, dim_head, dropout=0.1):
+    def __init__(self, dim, heads, dim_head, dropout=0.1, window_size=None):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = LinearAttention(dim, heads=heads, dim_head=dim_head)
+
+        if window_size is None:
+            self.attn = LinearAttention(dim, heads=heads, dim_head=dim_head)
+        else:
+            # 传入 3D 维度并开启偏置
+            self.attn = SpatiotemporalBinaryAttention(
+                dim=dim,
+                num_heads=heads,
+                window_size=(16, 12, 12),  # 例如 (16, 12, 12)
+                attn_quant=True,
+                pv_quant=True,
+                attn_bias=True
+            )
 
         # 🌟 新增：用于残差连接前的 Dropout
         self.drop = nn.Dropout(dropout)

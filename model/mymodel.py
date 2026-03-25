@@ -8,8 +8,8 @@ from model.fused import GatedFusion
 
 class MultiModalPVNet(nn.Module):
     def __init__(self, visual_input_cha=3, times_input_cha=10, patch_size=8, img_size=96, transformer_dim=384,
-                 self_depth=3, cross_depth=3,
-                 ricnn_in_channels=384, roi_size=16, final_dim=256, output_seq_len=4, heads=6, dim_head=64,
+                 self_depth=3, cross_depth=3, timeseries=16, ricnn_in_channels=384, roi_size=16, final_dim=256,
+                 output_seq_len=4, heads=6, dim_head=64,
                  dropout=0.1):
         super(MultiModalPVNet, self).__init__()
         self.img_size = img_size
@@ -23,9 +23,15 @@ class MultiModalPVNet(nn.Module):
         self.t_embed = nn.Linear(times_input_cha, transformer_dim)
         self.t_pos_embed = nn.Parameter(torch.randn(1, 16, transformer_dim))
 
+        # 1. 计算出具体的 T, H_p, W_p
+        self.T = timeseries  # 时间维度帧数
+        self.H_p = img_size // patch_size  # 96 // 8 = 12
+        self.W_p = img_size // patch_size  # 96 // 8 = 12
+
         # ================= 2. Stage 1: 多层独立自注意力 =================
         self.visual_sa_layers = nn.ModuleList([
-            TransformerBlock(dim=transformer_dim, heads=heads, dim_head=dim_head, dropout=dropout)
+            TransformerBlock(dim=transformer_dim, heads=heads, dim_head=dim_head, dropout=dropout,
+                             window_size=(self.T, self.H_p, self.W_p))
             for _ in range(self_depth)
         ])
 

@@ -22,7 +22,7 @@ from utils.metrics import evaluate_metrics
 from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss
 from loss.optimizer import create_mamba_optimizer
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 # ================= 配置区域 (Hyperparameters) =================
 # 加载配置
@@ -39,7 +39,7 @@ SAVE_DIR = config["pkg_path"]
 logger = setup_logger(SAVE_DIR)
 
 # 训练参数
-BATCH_SIZE = 64
+BATCH_SIZE = 16
 LEARNING_RATE = 2e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
