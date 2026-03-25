@@ -20,25 +20,43 @@ class SatellitePVDataset(Dataset):
         self.data = self.data.sort_index()
 
         # ====================================================================
-        # 🌟 新增：剔除包含空值的行 (直接利用你下方的时间连续性校验来避免切出断层样本)
+        # 🌟 进阶修改：先插值抢救，抢救无效再剔除 (兼顾连续性与真实性)
         # ====================================================================
         check_cols = [
-            'Active_Power',
-            'Global_Horizontal_Radiation',
-            'Weather_Temperature_Celsius',
-            'Weather_Relative_Humidity',
-            'Power_Norm',
-            'CSI'
+            'Active_Power', 'Global_Horizontal_Radiation',
+            'Weather_Temperature_Celsius', 'Weather_Relative_Humidity',
+            'Power_Norm', 'CSI', 'Clear_Sky_GHI'
         ]
-        # 防止有些列名大小写不一致或不存在，先做个过滤
         valid_check_cols = [col for col in check_cols if col in self.data.columns]
 
         len_before = len(self.data)
-        # 只要这几列中有任何一个是 NaN，就把这一整行删掉
+
+        # 第一步：时间线性插值抢救
+        # limit=4 表示最多允许连续缺失 4 个点 (即 1 小时)。
+        # 如果连续缺失 5 个点，中间的空值将保留，留给下一步 dropna 删掉。
+        # limit_direction='both' 允许双向插值
+        self.data[valid_check_cols] = self.data[valid_check_cols].interpolate(
+            method='time',
+            limit=4,
+            limit_direction='both'
+        )
+
+        # 第二步：物理常识兜底 (可选)
+        # 插值可能会把原本夜间的 CSI 插成微小的负数或正数，这里截断一下
+        if 'CSI' in self.data.columns:
+            self.data['CSI'] = self.data['CSI'].clip(lower=0.0)
+        if 'Power_Norm' in self.data.columns:
+            self.data['Power_Norm'] = self.data['Power_Norm'].clip(lower=0.0)
+
+        # 第三步：清理无药可救的断层
+        # 经过 limit=4 的插值后依然是 NaN 的，说明缺失时间太长，只能强行截断
         self.data = self.data.dropna(subset=valid_check_cols)
         len_after = len(self.data)
+
         if len_before != len_after:
-            print(f"[{mode}] 🧹 数据清洗: 剔除了 {len_before - len_after} 行包含空值(NaN)的记录。")
+            print(f"[{mode}] 🚑 数据修复与清洗: 尝试插值修复后，仍剔除了 {len_before - len_after} 行严重缺失的记录。")
+        else:
+            print(f"[{mode}] 🚑 数据修复完毕，时间序列完全连续！")
         # ====================================================================
 
         # 2. 时间序列的正余弦周期性编码 (捕捉日夜与季节周期规律)

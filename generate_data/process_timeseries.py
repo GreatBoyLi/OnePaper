@@ -170,5 +170,5 @@ if __name__ == "__main__":
     config = load_config("../config/config.yaml")
     print("========== 阶段 1: 处理训练集 ==========")
     process_timeseries(config, is_train=True)
-    print("\n========== 阶段 2: 处理验证/测试集 ==========")
-    process_timeseries(config, is_train=False)
+    # print("\n========== 阶段 2: 处理验证/测试集 ==========")
+    # process_timeseries(config, is_train=False)
