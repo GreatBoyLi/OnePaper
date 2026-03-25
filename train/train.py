@@ -28,7 +28,7 @@ VAL_CSV_PATH = config["val_file_paths"]["series_file"]
 VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 SAVE_DIR = config["pkg_path"]
 
-BATCH_SIZE = 64
+BATCH_SIZE = 8
 LEARNING_RATE = 2e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
@@ -40,12 +40,14 @@ FINAL_DIM = 64
 TRANSFORMER_DIM = 128
 HEADS = 4
 
+# 🌟 总开关：是否开启自适应动态权重
+AUTO_LOSS = True
 
-# Loss 权重
-# ALPHA = 1.0  # MSE (主目标不变)
-# BETA = 1.0  # 由于去掉了 sqrt，变成了 Grad MSE，权重可以放心给 1.0 或 0.5
-# GAMMA = 2.0  # 🌟 放大 20 倍！既然越界了，就狠狠惩罚，让 Phy 贡献达到 0.01 左右
-# LAMBDA_DCCA = 1e-4  # 🌟 缩小 10 倍！让 DCCA 的初始贡献降到 0.016 左右 (占比 5%~10%)，做好辅助工作即可
+# 固定 Loss 权重 (当 AUTO_LOSS = False 时生效)
+ALPHA = 1.0  # MSE
+BETA = 1.0  # Grad MSE
+GAMMA = 2.0  # Physics
+LAMBDA_DCCA = 1e-4  # NR-DCCA
 
 
 # ================= 分布式初始化 =================
@@ -64,7 +66,11 @@ def init_ddp():
 # ================= 训练与验证逻辑 =================
 def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, dcca_criterion, rank):
     model.train()
-    loss_weighter.train()  # 确保权重模块处于训练模式
+
+    # 仅当使用了自适应权重时，才设置为训练模式
+    if AUTO_LOSS and loss_weighter is not None:
+        loss_weighter.train()
+
     running_loss = torch.tensor(0.0).to(device)
 
     loop = tqdm(loader, desc="Training", leave=False, disable=(rank != 0))
@@ -88,13 +94,16 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
         loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
         loss_dcca = dcca_criterion(v_feat, t_feat)
 
-        # 🌟 使用自适应权重模块融合 Loss
-        losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
-        total_loss = loss_weighter(losses)
+        # 🌟 根据开关选择 Loss 融合方式
+        if AUTO_LOSS:
+            losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
+            total_loss = loss_weighter(losses)
+        else:
+            total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
 
         total_loss.backward()
 
-        # 裁剪模型参数梯度 (不对 loss_weighter 裁剪)
+        # 裁剪模型参数梯度
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
@@ -103,17 +112,19 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
         running_loss += total_loss.detach()
 
         if rank == 0:
-            # 动态获取当前的自适应权重 (兼容 DDP)
-            lw_module = loss_weighter.module if dist.is_initialized() else loss_weighter
-            cur_weights = lw_module.get_current_weights()
-
-            loop.set_postfix(
-                Loss=f"{total_loss.item():.4f}",
-                W_M=f"{cur_weights[0]:.4f}",
-                W_G=f"{cur_weights[1]:.4f}",
-                W_P=f"{cur_weights[2]:.4f}",
-                W_D=f"{cur_weights[3]:.4f}"  # DCCA 权重可能很小，多保留几位
-            )
+            if AUTO_LOSS:
+                # 动态获取当前的自适应权重 (兼容 DDP)
+                lw_module = loss_weighter.module if dist.is_initialized() else loss_weighter
+                cur_weights = lw_module.get_current_weights()
+                loop.set_postfix(
+                    Loss=f"{total_loss.item():.4f}",
+                    W_M=f"{cur_weights[0]:.4f}",
+                    W_G=f"{cur_weights[1]:.4f}",
+                    W_P=f"{cur_weights[2]:.4f}",
+                    W_D=f"{cur_weights[3]:.4f}"
+                )
+            else:
+                loop.set_postfix(Loss=f"{total_loss.item():.4f}")
 
     if dist.is_initialized():
         dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
@@ -127,7 +138,9 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
 
 def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, rank):
     model.eval()
-    loss_weighter.eval()
+
+    if AUTO_LOSS and loss_weighter is not None:
+        loss_weighter.eval()
 
     sum_loss = torch.tensor(0.0).to(device)
     total_count = torch.tensor(0.0).to(device)
@@ -156,9 +169,13 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
             loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
             loss_dcca = dcca_criterion(v_feat, t_feat)
 
-            # 🌟 验证集同样使用自适应权重模块计算整体 Loss
-            losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
-            total_loss = loss_weighter(losses)
+            # 🌟 验证集同样根据开关选择 Loss 融合方式
+            if AUTO_LOSS:
+                losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
+                total_loss = loss_weighter(losses)
+            else:
+                total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
+
             sum_loss += total_loss.detach()
 
             night_mask = zeniths > 88
@@ -231,10 +248,11 @@ def main():
             os.makedirs(SAVE_DIR)
         logger = setup_logger(SAVE_DIR)
         set_seed(logger, 42)
+        mode_str = "自适应权重版" if AUTO_LOSS else "固定权重版"
         if dist.is_initialized():
-            logger.info(f"🚀 启动分布式训练 (自适应权重版) | World Size: {world_size} | 设备: {DEVICE}")
+            logger.info(f"🚀 启动分布式训练 ({mode_str}) | World Size: {world_size} | 设备: {DEVICE}")
         else:
-            logger.info(f"🚀 启动单卡直通训练 (自适应权重版) | 设备: {DEVICE}")
+            logger.info(f"🚀 启动单卡直通训练 ({mode_str}) | 设备: {DEVICE}")
 
     if dist.is_initialized():
         train_dataset = SatellitePVDataset(TRAIN_CSV_PATH, TRAIN_SAT_DIR, mode="train")
@@ -260,17 +278,24 @@ def main():
     ).to(DEVICE)
     model.apply(init_weights)
 
-    # 🌟 2. 构建自适应权重模块
-    loss_weighter = AdaptiveLossWeighter(num_losses=4).to(DEVICE)
+    loss_weighter = None
+
+    # 🌟 2. 根据开关决定是否构建自适应权重模块
+    if AUTO_LOSS:
+        loss_weighter = AdaptiveLossWeighter(num_losses=4).to(DEVICE)
 
     if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
-        # 权重模块也需要 DDP 同步
-        loss_weighter = DDP(loss_weighter, device_ids=[local_rank], output_device=local_rank)
+        # 如果启用了自适应，权重模块也需要 DDP 同步
+        if AUTO_LOSS:
+            loss_weighter = DDP(loss_weighter, device_ids=[local_rank], output_device=local_rank)
 
-    # 🌟 3. 将权重模块的参数也放进优化器 (给予稍高的学习率帮助其快速调整)
+    # 🌟 3. 配置优化器
     optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    optimizer.add_param_group({'params': loss_weighter.parameters(), 'lr': LEARNING_RATE * 5})
+
+    # 如果开启自适应，将权重模块参数放进优化器
+    if AUTO_LOSS:
+        optimizer.add_param_group({'params': loss_weighter.parameters(), 'lr': LEARNING_RATE * 5})
 
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=LEARNING_RATE, epochs=NUM_EPOCHS,
@@ -297,7 +322,7 @@ def main():
         if dist.is_initialized():
             train_sampler.set_epoch(epoch)
 
-        # 传入 loss_weighter
+        # 传入 loss_weighter（关闭自适应时为 None）
         train_loss = train_one_epoch(model, loss_weighter, train_loader, optimizer, DEVICE, scheduler, dcca_criterion,
                                      rank)
         val_loss, val_metrics = validate_distributed(model, loss_weighter, val_loader, DEVICE, dcca_criterion, rank)
@@ -317,16 +342,20 @@ def main():
             mape_hist.append(current_mape)
             r_hist.append(current_r)
 
-            # 获取并打印当前权重
-            lw_module = loss_weighter.module if dist.is_initialized() else loss_weighter
-            cur_weights = lw_module.get_current_weights()
-
             logger.info(
                 f"Epoch [{epoch + 1}/{NUM_EPOCHS}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {current_lr:.2e}")
             logger.info(
                 f"   => RMSE: {current_rmse:.4f} | MAE: {current_mae:.4f} | MAPE: {current_mape:.2f}% | R: {current_r:.2f}%")
-            logger.info(
-                f"   => 动态权重: [MSE:{cur_weights[0]:.4f}, Grad:{cur_weights[1]:.4f}, Phy:{cur_weights[2]:.4f}, DCCA:{cur_weights[3]:.4f}]")
+
+            # 🌟 根据开关决定日志打印内容
+            if AUTO_LOSS:
+                lw_module = loss_weighter.module if dist.is_initialized() else loss_weighter
+                cur_weights = lw_module.get_current_weights()
+                logger.info(
+                    f"   => 动态权重: [MSE:{cur_weights[0]:.4f}, Grad:{cur_weights[1]:.4f}, Phy:{cur_weights[2]:.4f}, DCCA:{cur_weights[3]:.4f}]")
+            else:
+                logger.info(
+                    f"   => 固定权重: [MSE:{ALPHA:.4f}, Grad:{BETA:.4f}, Phy:{GAMMA:.4f}, DCCA:{LAMBDA_DCCA:.4f}]")
 
             any_improvement = False
             model_to_save = model.module if dist.is_initialized() else model
