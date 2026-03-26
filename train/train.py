@@ -302,7 +302,8 @@ def main():
             loss_weighter = DDP(loss_weighter, device_ids=[local_rank], output_device=local_rank)
 
     # 🌟 3. 配置优化器
-    optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
     # 如果开启自适应，将权重模块参数放进优化器
     if AUTO_LOSS:
