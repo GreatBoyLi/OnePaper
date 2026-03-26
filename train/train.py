@@ -195,7 +195,7 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
             if valid_mask.sum() > 0:
                 sum_ape += torch.sum(torch.abs(error[valid_mask] / targets[valid_mask]))
 
-            sum_mape_count += valid_mask.sum()
+            # sum_mape_count += valid_mask.sum()
 
             sum_x += torch.sum(preds_power)
             sum_y += torch.sum(targets)
@@ -229,8 +229,8 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
         final_rmse = math.sqrt(sum_se.item() / N)
         final_mae = sum_ae.item() / N
         # 🌟 使用过滤后的点数作为分母，防止除 0
-        valid_N = sum_mape_count.item()
-        final_mape = (sum_ape.item() / valid_N) * 100.0 if valid_N > 0 else 0.0
+        # valid_N = sum_mape_count.item()
+        final_mape = (sum_ape.item() / N) * 100.0  # if valid_N > 0 else 0.0
 
         numerator = N * sum_xy.item() - (sum_x.item() * sum_y.item())
         denominator = math.sqrt(max(N * sum_x2.item() - sum_x.item() ** 2, 1e-8)) * \

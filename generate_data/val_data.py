@@ -9,10 +9,10 @@ def full_28_day(path, output_path):
 
     # 2. 定义我们选好的四个典型时间段
     target_periods = [
-        ('2025-02-15', '2025-02-21'),
-        ('2025-04-15', '2025-04-21'),
-        ('2025-07-15', '2025-07-21'),
-        ('2025-10-15', '2025-10-21')
+        ('2024-01-15', '2024-01-21'),
+        ('2024-04-15', '2024-04-21'),
+        ('2024-07-15', '2024-07-21'),
+        ('2024-10-15', '2024-10-21')
     ]
 
     # 3. 把这四个时间段的数据拼接起来
@@ -130,9 +130,9 @@ def merge_validation_sets(file1, file2, output_file):
 if __name__ == "__main__":
     # 配置你的文件路径
     INPUT_CSV = "../data/val/series_file.csv"
-    OUTPUT_CSV1 = "../data/val_2025_28days_sampled.csv"
-    OUTPUT_CSV2 = "../data/val_2025_10days_hardcore.csv"  # 输出的高难度验证集
-    OUTPUT_CSV3 = "../data/val/series_file.csv"
+    OUTPUT_CSV1 = "../data/val_2024_28days_sampled.csv"
+    OUTPUT_CSV2 = "../data/val_2024_10days_hardcore.csv"  # 输出的高难度验证集
+    OUTPUT_CSV3 = "../data/val/series_file_bak.csv"
     full_28_day(INPUT_CSV, OUTPUT_CSV1)
 
     # 确保文件存在再运行
