@@ -28,8 +28,13 @@ VAL_CSV_PATH = config["val_file_paths"]["series_file"]
 VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 SAVE_DIR = config["pkg_path"]
 
-BATCH_SIZE = 64
-LEARNING_RATE = 2e-4
+# 🌟 预训练模型路径 (如果是微调，填入 pth 文件路径；如果是从头训练，保持为空字符串 "")
+PRETRAINED_MODEL_PATH = "../checkpoints/Epoch:4-RMSE:0.0392-MAE:0.0211-MAPE:7.51%-R:99.28%.pth"
+LEARNING_RATE = 3e-5
+
+BATCH_SIZE = 32
+# ⚠️ 注意：如果是微调 (加载了模型)，建议将学习率调小，例如 3e-5！
+# LEARNING_RATE = 1e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
 WEIGHT_DECAY = 1e-2
@@ -44,9 +49,9 @@ HEADS = 4
 AUTO_LOSS = False
 
 # 固定 Loss 权重 (当 AUTO_LOSS = False 时生效)
-ALPHA = 2.0  # MSE
+ALPHA = 10.0  # MSE
 BETA = 1.0  # Grad MSE
-GAMMA = 9.0  # Physics
+GAMMA = 0.5  # Physics
 LAMBDA_DCCA = 0.004  # NR-DCCA
 
 
@@ -147,7 +152,7 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
     sum_se = torch.tensor(0.0).to(device)
     sum_ae = torch.tensor(0.0).to(device)
     sum_ape = torch.tensor(0.0).to(device)
-    sum_mape_count = torch.tensor(0.0).to(device)  # 🌟 新增：专门记录大于阈值的点数
+    sum_mape_count = torch.tensor(0.0).to(device)
     sum_x = torch.tensor(0.0).to(device)
     sum_y = torch.tensor(0.0).to(device)
     sum_xy = torch.tensor(0.0).to(device)
@@ -187,15 +192,11 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
             sum_ae += torch.sum(torch.abs(error))
 
             # ========= 修改 MAPE 的计算方式 =========
-            # 设定阈值：例如真实功率大于 0.03 (即装机容量的 3%) 时，才计算 MAPE
-            # 这可以完美避开清晨、黄昏和深夜的除零/除极小值爆炸问题
-            THRESHOLD = 0.03
+            THRESHOLD = 0.01
             valid_mask = targets > THRESHOLD
 
             if valid_mask.sum() > 0:
                 sum_ape += torch.sum(torch.abs(error[valid_mask] / targets[valid_mask]))
-
-            # sum_mape_count += valid_mask.sum()
 
             sum_x += torch.sum(preds_power)
             sum_y += torch.sum(targets)
@@ -211,7 +212,7 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
         dist.all_reduce(sum_se, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_ae, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_ape, op=dist.ReduceOp.SUM)
-        dist.all_reduce(sum_mape_count, op=dist.ReduceOp.SUM)  # 🌟 新增同步
+        dist.all_reduce(sum_mape_count, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_x, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_y, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_xy, op=dist.ReduceOp.SUM)
@@ -228,9 +229,7 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
         N = total_count.item()
         final_rmse = math.sqrt(sum_se.item() / N)
         final_mae = sum_ae.item() / N
-        # 🌟 使用过滤后的点数作为分母，防止除 0
-        # valid_N = sum_mape_count.item()
-        final_mape = (sum_ape.item() / N) * 100.0  # if valid_N > 0 else 0.0
+        final_mape = (sum_ape.item() / N) * 100.0
 
         numerator = N * sum_xy.item() - (sum_x.item() * sum_y.item())
         denominator = math.sqrt(max(N * sum_x2.item() - sum_x.item() ** 2, 1e-8)) * \
@@ -282,12 +281,23 @@ def main():
                               num_workers=4, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, sampler=val_sampler, shuffle=False, num_workers=4)
 
-    # 1. 构建主模型
+    # 1. 构建主模型并初始化权重
     model = MultiModalPVNet(
         final_dim=FINAL_DIM, transformer_dim=TRANSFORMER_DIM, heads=HEADS,
         self_depth=SELF_DEPTH, cross_depth=CROSS_DEPTH, output_seq_len=4, dropout=DROPOUT
     ).to(DEVICE)
     model.apply(init_weights)
+
+    # 🌟 1.5 尝试加载预训练模型 (微调模式)
+    is_finetuning = False
+    if PRETRAINED_MODEL_PATH and os.path.exists(PRETRAINED_MODEL_PATH):
+        if rank == 0:
+            logger.info(f"🔄 正在加载预训练权重进行微调: {PRETRAINED_MODEL_PATH}")
+        model.load_state_dict(torch.load(PRETRAINED_MODEL_PATH, map_location=DEVICE))
+        is_finetuning = True
+    elif PRETRAINED_MODEL_PATH:
+        if rank == 0:
+            logger.warning(f"⚠️ 未找到预训练权重文件: {PRETRAINED_MODEL_PATH}，将从头开始训练！")
 
     loss_weighter = None
 
@@ -302,17 +312,28 @@ def main():
             loss_weighter = DDP(loss_weighter, device_ids=[local_rank], output_device=local_rank)
 
     # 🌟 3. 配置优化器
-    # optimizer = create_mamba_optimizer(model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
     # 如果开启自适应，将权重模块参数放进优化器
     if AUTO_LOSS:
         optimizer.add_param_group({'params': loss_weighter.parameters(), 'lr': LEARNING_RATE * 5})
 
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=LEARNING_RATE, epochs=NUM_EPOCHS,
-        steps_per_epoch=len(train_loader), pct_start=0.1, anneal_strategy='cos'
-    )
+    # 🌟 4. 智能选择调度器
+    if is_finetuning:
+        if rank == 0:
+            logger.info("📉 检测到微调模式，使用 CosineAnnealingLR 调度器 (无预热，缓慢衰减)")
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=NUM_EPOCHS * len(train_loader), # 按照步数退火
+            eta_min=1e-6
+        )
+    else:
+        if rank == 0:
+            logger.info("📈 检测到从头训练模式，使用 OneCycleLR 调度器 (含预热)")
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=LEARNING_RATE, epochs=NUM_EPOCHS,
+            steps_per_epoch=len(train_loader), pct_start=0.1, anneal_strategy='cos'
+        )
 
     dcca_criterion = NRDCCALoss(lambd=1e-3, noise_std=0.05, nr_weight=0.5).to(DEVICE)
 
