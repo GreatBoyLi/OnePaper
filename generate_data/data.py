@@ -9,8 +9,8 @@ from generate_data.align_time import process_alignment_for_day
 from utils.config import load_config
 
 if __name__ == "__main__":
-    is_train = False
-    # is_train = True
+    # is_train = False
+    is_train = True
     config = load_config("../config/config.yaml")
     # 处理卫星图像
     if is_train:

@@ -30,7 +30,7 @@ SAVE_DIR = config["pkg_path"]
 
 # 🌟 预训练模型路径 (如果是微调，填入 pth 文件路径；如果是从头训练，保持为空字符串 "")
 PRETRAINED_MODEL_PATH = "../checkpoints/Epoch:4-RMSE:0.0392-MAE:0.0211-MAPE:7.51%-R:99.28%.pth"
-LEARNING_RATE = 3e-5
+LEARNING_RATE = 2e-6
 
 BATCH_SIZE = 32
 # ⚠️ 注意：如果是微调 (加载了模型)，建议将学习率调小，例如 3e-5！
@@ -325,7 +325,7 @@ def main():
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=NUM_EPOCHS * len(train_loader), # 按照步数退火
-            eta_min=1e-6
+            eta_min=1e-8
         )
     else:
         if rank == 0:
