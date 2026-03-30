@@ -1,14 +1,24 @@
+import matplotlib.pyplot as plt
 import os
 import torch
-import random
-import matplotlib.pyplot as plt
+import torch.optim as optim
+from torch.utils.data import DataLoader, DistributedSampler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from tqdm import tqdm
+import math
+import warnings
 import numpy as np
-from torch.utils.data import DataLoader
 
-# 导入你自己写的模块 (与 train.py 保持一致)
+# 忽略所有特定的警告
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.custom_fwd.*")
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.custom_bwd.*")
+
+# 导入自己写的模块
 from dataset.dataset import SatellitePVDataset
 from model.mymodel import MultiModalPVNet
-from utils.config import load_config, setup_logger
+from utils.config import load_config, setup_logger, plot_metrics_curve, plot_loss_curve, set_seed, init_weights
+from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss, NRDCCALoss, AdaptiveLossWeighter
 
 # ================= 1. 配置区域 =================
 # 建议通过显卡 0 或 CPU 进行简单推理
@@ -23,7 +33,7 @@ VAL_CSV_PATH = config["val_file_paths"]["series_file"]
 VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 
 # 🌟 请将这里替换为你训练出来的、表现最好的模型权重文件名！
-MODEL_WEIGHTS_PATH = os.path.join(config["pkg_path"], "Epoch:33-best_rmse_model-RMSE:0.0629-MAE:0.0275-MAPE:14.62%-R:97.39%.pth")
+MODEL_WEIGHTS_PATH = os.path.join(config["pkg_path"], "Epoch:99-RMSE:0.0640-MAE:0.0329-MAPE:23.12%-R:97.32%.pth")
 
 # 模型结构参数 (必须与 train.py 中完全一致)
 FINAL_DIM = 64
@@ -36,6 +46,13 @@ SEQ_LEN = 4  # 预测未来4个时间步
 
 # 可视化样本数量
 NUM_SAMPLES_TO_PLOT = 5
+AUTO_LOSS = False
+
+# 固定 Loss 权重 (当 AUTO_LOSS = False 时生效)
+ALPHA = 10.0  # MSE
+BETA = 1.0  # Grad MSE
+GAMMA = 0.5  # Physics
+LAMBDA_DCCA = 0.004  # NR-DCCA
 
 
 # ================= 2. 可视化绘图函数 =================
@@ -68,6 +85,114 @@ def plot_prediction(y_true, y_pred, sample_idx, save_dir):
     plt.savefig(plot_path, dpi=300)
     plt.close()
     return plot_path
+
+
+def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, rank):
+    model.eval()
+
+    if AUTO_LOSS and loss_weighter is not None:
+        loss_weighter.eval()
+
+    sum_loss = torch.tensor(0.0).to(device)
+    total_count = torch.tensor(0.0).to(device)
+    sum_se = torch.tensor(0.0).to(device)
+    sum_ae = torch.tensor(0.0).to(device)
+    sum_ape = torch.tensor(0.0).to(device)
+    sum_mape_count = torch.tensor(0.0).to(device)
+    sum_x = torch.tensor(0.0).to(device)
+    sum_y = torch.tensor(0.0).to(device)
+    sum_xy = torch.tensor(0.0).to(device)
+    sum_x2 = torch.tensor(0.0).to(device)
+    sum_y2 = torch.tensor(0.0).to(device)
+
+    loop = tqdm(loader, desc="Validate", leave=False, disable=(rank != 0))
+
+    with torch.no_grad():
+        for batch in loop:
+            imgs = batch['x_images'].to(device)
+            nums = batch['x_numeric'].to(device)
+            targets = batch['y_power'].to(device)
+            zeniths = batch['y_zenith'].to(device)
+            y_clearsky = batch['y_clear_sky_ghi'].to(device)
+
+            preds_csi, v_feat, t_feat, _ = model(imgs, nums)
+            preds_power = preds_csi * y_clearsky
+
+            loss_mse = masked_mse_loss(preds_power, targets, zeniths)
+            loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
+            loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
+            loss_dcca = dcca_criterion(v_feat, t_feat)
+
+            # 🌟 验证集同样根据开关选择 Loss 融合方式
+            if AUTO_LOSS:
+                losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
+                total_loss = loss_weighter(losses)
+            else:
+                total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
+
+            sum_loss += total_loss.detach()
+
+            night_mask = zeniths > 88
+            preds_power[night_mask] = 0.0
+
+            error = preds_power - targets
+            sum_se += torch.sum(error ** 2)
+            sum_ae += torch.sum(torch.abs(error))
+
+            # ========= 修改 MAPE 的计算方式 =========
+            THRESHOLD = 0.01
+            valid_mask = targets > THRESHOLD
+
+            if valid_mask.sum() > 0:
+                sum_ape += torch.sum(torch.abs(error[valid_mask] / targets[valid_mask]))
+
+            sum_x += torch.sum(preds_power)
+            sum_y += torch.sum(targets)
+            sum_xy += torch.sum(preds_power * targets)
+            sum_x2 += torch.sum(preds_power ** 2)
+            sum_y2 += torch.sum(targets ** 2)
+
+            total_count += targets.numel()
+
+    if dist.is_initialized():
+        dist.all_reduce(sum_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_se, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_ae, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_ape, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_mape_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_x, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_y, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_xy, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_x2, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_y2, op=dist.ReduceOp.SUM)
+        world_size = dist.get_world_size()
+    else:
+        world_size = 1
+
+    avg_loss = sum_loss.item() / (len(loader) * world_size)
+    metrics = {}
+
+    if rank == 0:
+        N = total_count.item()
+        final_rmse = math.sqrt(sum_se.item() / N)
+        final_mae = sum_ae.item() / N
+        final_mape = (sum_ape.item() / N) * 100.0
+
+        numerator = N * sum_xy.item() - (sum_x.item() * sum_y.item())
+        denominator = math.sqrt(max(N * sum_x2.item() - sum_x.item() ** 2, 1e-8)) * \
+                      math.sqrt(max(N * sum_y2.item() - sum_y.item() ** 2, 1e-8))
+
+        final_r = (numerator / denominator) * 100.0 if denominator > 0 else 0.0
+
+        metrics = {
+            'RMSE': final_rmse,
+            'MAE': final_mae,
+            'MAPE(%)': final_mape,
+            'R(%)': final_r
+        }
+
+    return avg_loss, metrics
 
 
 # ================= 3. 主推理逻辑 =================
@@ -104,7 +229,13 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     plot_count = 0
+    dcca_criterion = NRDCCALoss(lambd=1e-3, noise_std=0.05, nr_weight=0.5).to(DEVICE)
 
+    val_loss, val_metrics = validate_distributed(model, loss_weighter=None, loader=loader, device=DEVICE,
+                                                 dcca_criterion=dcca_criterion, rank=0)
+    print((val_loss))
+    print("\n")
+    print(val_metrics)
     with torch.no_grad():
         for i, batch in enumerate(loader):
             if plot_count >= NUM_SAMPLES_TO_PLOT:
@@ -117,7 +248,7 @@ def main():
             y_clearsky = batch['y_clear_sky_ghi'].to(DEVICE)
 
             # 1. 模型预测 CSI
-            preds_csi = model(imgs, nums)
+            preds_csi, v_feat, t_feat, _ = model(imgs, nums)
 
             # 2. 物理还原：CSI 还原为功率
             preds_power = preds_csi * y_clearsky
