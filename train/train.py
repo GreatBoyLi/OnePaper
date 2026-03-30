@@ -29,7 +29,7 @@ VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 SAVE_DIR = config["pkg_path"]
 
 # 🌟 预训练模型路径 (如果是微调，填入 pth 文件路径；如果是从头训练，保持为空字符串 "")
-PRETRAINED_MODEL_PATH = "../checkpoints/Epoch:4-RMSE:0.0392-MAE:0.0211-MAPE:7.51%-R:99.28%.pth"
+PRETRAINED_MODEL_PATH = "../checkpoints/Epoch:99-RMSE:0.0612-MAE:0.0299-MAPE:22.87%-R:97.45%.pth"
 LEARNING_RATE = 2e-8
 
 BATCH_SIZE = 32
