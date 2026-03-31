@@ -29,10 +29,11 @@ VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 SAVE_DIR = config["pkg_path"]
 
 # 🌟 预训练模型路径 (如果是微调，填入 pth 文件路径；如果是从头训练，保持为空字符串 "")
-PRETRAINED_MODEL_PATH = "../checkpoints/Epoch:99-RMSE:0.0612-MAE:0.0299-MAPE:22.87%-R:97.45%.pth"
+PRETRAINED_MODEL_PATH = "../checkpoints/Epoch:91-RMSE:0.0607-MAE:0.0297-MAPE:22.65%-R:97.50%.pth"
 LEARNING_RATE = 2e-8
+ONLY_DAT_TIME = True
 
-BATCH_SIZE = 32
+BATCH_SIZE = 100
 # ⚠️ 注意：如果是微调 (加载了模型)，建议将学习率调小，例如 3e-5！
 # LEARNING_RATE = 1e-4
 NUM_EPOCHS = 100
@@ -97,7 +98,21 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
         loss_mse = masked_mse_loss(preds_power, targets, zeniths)
         loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
         loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
-        loss_dcca = dcca_criterion(v_feat, t_feat)
+        if ONLY_DAT_TIME:
+            # 🌟筛选出属于“白天”的样本，才送去算 DCCA
+            # 只要这个样本的预测窗口里有任意一个时刻 <= 86°，我们就认为它包含了白天特征
+            daytime_sample_mask = (zeniths <= 86.0).any(dim=1)
+            # 提取白天样本的特征
+            valid_v_feat = v_feat[daytime_sample_mask]
+            valid_t_feat = t_feat[daytime_sample_mask]
+
+            # 如果这个 Batch 里至少有 2 个白天样本 (DCCA 算相关性至少需要 2 个样本)
+            if valid_v_feat.size(0) > 1:
+                loss_dcca = dcca_criterion(valid_v_feat, valid_t_feat)
+            else:
+                loss_dcca = torch.tensor(0.0, device=device)
+        else:
+            loss_dcca = dcca_criterion(v_feat, t_feat)
 
         # 🌟 根据开关选择 Loss 融合方式
         if AUTO_LOSS:
@@ -325,7 +340,7 @@ def main():
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=NUM_EPOCHS * len(train_loader),  # 按照步数退火
-            eta_min=1e-10
+            eta_min=5e-10
         )
     else:
         if rank == 0:
