@@ -256,26 +256,43 @@ class NRDCCALoss(nn.Module):
         return total_loss
 
 
-# ================= 自适应权重模块 =================
+import torch
+import torch.nn as nn
+
+
 class AdaptiveLossWeighter(nn.Module):
-    """基于同方差不确定性的自适应多任务权重模块"""
+    """
+    基于同方差不确定性的混合多任务权重模块。
+    🌟 修改版：只对正数 Loss（如 MSE, Grad, Phy）进行自适应加权。
+    对于可能为负数的 Loss（如 DCCA），使用传入的固定权重，防止因负数导致权重爆炸。
+    """
 
-    def __init__(self, num_losses=4):
+    def __init__(self, num_positive_losses=3):
         super(AdaptiveLossWeighter, self).__init__()
-        # 初始化 4 个可学习的对数方差参数 s_i
+        # 初始化可学习的对数方差参数 s_i，仅用于正数 losses
         # 初始值为 0，意味着初始权重 exp(0) = 1.0
-        self.log_vars = nn.Parameter(torch.zeros(num_losses))
+        self.log_vars = nn.Parameter(torch.zeros(num_positive_losses))
 
-    def forward(self, losses):
-        """losses: 包含多个标量 loss 的列表"""
+    def forward(self, positive_losses, dcca_loss, lambda_dcca=0.004):
+        """
+        :param positive_losses: 包含多个正数标量 loss 的列表 [loss_mse, loss_grad, loss_phy]
+        :param dcca_loss: 单独传入的、可能为负数且越小越好的 DCCA Loss
+        :param lambda_dcca: 外部传入的固定超参数权重 (控制 DCCA 的量级)
+        """
         total_loss = 0
-        for i, loss in enumerate(losses):
+
+        # 1. 前面几个正数 Loss 走自适应分配
+        for i, loss in enumerate(positive_losses):
             # 乘以自适应权重 exp(-s_i)，并加上正则项 s_i
             precision = torch.exp(-self.log_vars[i])
             total_loss += loss * precision + self.log_vars[i]
+
+        # 2. 🛡️ DCCA Loss 走强制的固定权重，避开 exp(-s_i) 机制，防止遭遇负数时梯度雪崩
+        total_loss += lambda_dcca * dcca_loss
+
         return total_loss
 
     def get_current_weights(self):
-        """获取当前实际生效的权重值 (用于日志打印)"""
+        """获取当前实际生效的自适应权重值 (用于日志打印)"""
         with torch.no_grad():
             return torch.exp(-self.log_vars).cpu().tolist()

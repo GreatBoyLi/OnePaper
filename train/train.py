@@ -16,7 +16,8 @@ warnings.filterwarnings("ignore", message=".*torch.cuda.amp.custom_bwd.*")
 from dataset.dataset import SatellitePVDataset
 from model.mymodel import MultiModalPVNet
 from utils.config import load_config, setup_logger, plot_metrics_curve, plot_loss_curve, set_seed, init_weights
-from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss, NRDCCALoss, AdaptiveLossWeighter
+from loss.loss import masked_mse_loss, gradient_rmse_loss, physics_constraint_loss, AdaptiveLossWeighter
+from loss.nrdcca import NRDCCALoss
 from loss.optimizer import create_mamba_optimizer
 
 # ================= 配置区域 (Hyperparameters) =================
@@ -29,16 +30,17 @@ VAL_SAT_DIR = config["val_file_paths"]["aligned_satellite_path"]
 SAVE_DIR = config["pkg_path"]
 
 # 🌟 预训练模型路径 (如果是微调，填入 pth 文件路径；如果是从头训练，保持为空字符串 "")
-PRETRAINED_MODEL_PATH = "../checkpoints/Epoch:91-RMSE:0.0607-MAE:0.0297-MAPE:22.65%-R:97.50%.pth"
-LEARNING_RATE = 2e-8
+# PRETRAINED_MODEL_PATH = "../checkpoints/Epoch:91-RMSE:0.0607-MAE:0.0297-MAPE:22.65%-R:97.50%.pth"
+PRETRAINED_MODEL_PATH = ""
+# LEARNING_RATE = 2e-8
 ONLY_DAT_TIME = True
 
-BATCH_SIZE = 100
+BATCH_SIZE = 32
 # ⚠️ 注意：如果是微调 (加载了模型)，建议将学习率调小，例如 3e-5！
-# LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
-WEIGHT_DECAY = 1e-2
+WEIGHT_DECAY = 1e-4
 DROPOUT = 0.3
 SELF_DEPTH = 3
 CROSS_DEPTH = 3
@@ -47,9 +49,9 @@ TRANSFORMER_DIM = 128
 HEADS = 4
 
 # 🌟 总开关：是否开启自适应动态权重
-AUTO_LOSS = False
+AUTO_LOSS = True
 
-# 固定 Loss 权重 (当 AUTO_LOSS = False 时生效)
+# 固定 Loss 权重 (当 AUTO_LOSS = False 时生效，或者用于混合模式下的 DCCA 约束)
 ALPHA = 10.0  # MSE
 BETA = 1.0  # Grad MSE
 GAMMA = 0.5  # Physics
@@ -90,37 +92,87 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
 
         optimizer.zero_grad()
 
-        # 模型预测
-        preds_csi, v_feat, t_feat, _ = model(imgs, nums)
+        # ----------------------------------------------------
+        # 🌟 第一步: 生成噪声并沿着 Batch 维度拼接 (优化显存与BN层)
+        # ----------------------------------------------------
+        B = imgs.size(0)  # 记录原始 Batch Size
+        noise_imgs = torch.randn_like(imgs)
+        noise_nums = torch.randn_like(nums)
+
+        # 拼接数据，送入模型的大小变为 (2B, ...)
+        combined_imgs = torch.cat([imgs, noise_imgs], dim=0)
+        combined_nums = torch.cat([nums, noise_nums], dim=0)
+
+        # ----------------------------------------------------
+        # 🌟 第二步: 仅进行一次前向传播
+        # ----------------------------------------------------
+        combined_preds, combined_v_feat, combined_t_feat, _ = model(combined_imgs, combined_nums)
+
+        # 将结果切分开来 (前半部分是真实数据，后半部分是纯噪声数据)
+        preds_csi = combined_preds[:B]
+        v_feat = combined_v_feat[:B]
+        t_feat = combined_t_feat[:B]
+
+        noise_v_feat = combined_v_feat[B:]
+        noise_t_feat = combined_t_feat[B:]
+
+        # 模型预测功率 (仅使用真实数据部分)
         preds_power = preds_csi * y_clearsky
 
-        # 计算各个基础 Loss
+        # 计算各个基础 Loss (仅使用真实数据部分)
         loss_mse = masked_mse_loss(preds_power, targets, zeniths)
         loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
         loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
+
+        # ----------------------------------------------------
+        # 🌟 第三步: NR-DCCA 的核心逻辑 (使用切分后的数据)
+        # ----------------------------------------------------
         if ONLY_DAT_TIME:
             # 🌟筛选出属于“白天”的样本，才送去算 DCCA
-            # 只要这个样本的预测窗口里有任意一个时刻 <= 86°，我们就认为它包含了白天特征
             daytime_sample_mask = (zeniths <= 86.0).any(dim=1)
-            # 提取白天样本的特征
+
+            # 提取白天样本的真实特征与噪声特征
+            valid_imgs = imgs[daytime_sample_mask]
+            valid_nums = nums[daytime_sample_mask]
             valid_v_feat = v_feat[daytime_sample_mask]
             valid_t_feat = t_feat[daytime_sample_mask]
 
+            valid_noise_imgs = noise_imgs[daytime_sample_mask]
+            valid_noise_nums = noise_nums[daytime_sample_mask]
+            valid_noise_v_feat = noise_v_feat[daytime_sample_mask]
+            valid_noise_t_feat = noise_t_feat[daytime_sample_mask]
+
             # 如果这个 Batch 里至少有 2 个白天样本 (DCCA 算相关性至少需要 2 个样本)
             if valid_v_feat.size(0) > 1:
-                loss_dcca = dcca_criterion(valid_v_feat, valid_t_feat)
+                loss_dcca = dcca_criterion(
+                    valid_imgs, valid_nums, valid_v_feat, valid_t_feat,
+                    valid_noise_imgs, valid_noise_nums, valid_noise_v_feat, valid_noise_t_feat
+                )
             else:
-                loss_dcca = torch.tensor(0.0, device=device)
+                # 🛡️ DDP 保命符: 若跳过计算，需给一个乘以 0 的 loss
+                loss_dcca = (v_feat.sum() + t_feat.sum() + noise_v_feat.sum() + noise_t_feat.sum()) * 0.0
         else:
-            loss_dcca = dcca_criterion(v_feat, t_feat)
+            if v_feat.size(0) > 1:
+                loss_dcca = dcca_criterion(
+                    imgs, nums, v_feat, t_feat,
+                    noise_imgs, noise_nums, noise_v_feat, noise_t_feat
+                )
+            else:
+                loss_dcca = (v_feat.sum() + t_feat.sum() + noise_v_feat.sum() + noise_t_feat.sum()) * 0.0
 
-        # 🌟 根据开关选择 Loss 融合方式
+        # ----------------------------------------------------
+        # 🌟 第四步: Loss 混合权重计算 (半自适应半固定)
+        # ----------------------------------------------------
         if AUTO_LOSS:
-            losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
-            total_loss = loss_weighter(losses)
+            positive_losses = [loss_mse, loss_grad, loss_phy]
+            # 传入 3 个正数 Loss，外加单独的 loss_dcca 及其固定惩罚权重
+            total_loss = loss_weighter(positive_losses, loss_dcca, lambda_dcca=LAMBDA_DCCA)
         else:
-            # total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
-            total_loss = ALPHA * loss_mse + LAMBDA_DCCA * loss_dcca
+            total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
+
+        # 加上对未使用的噪声预测部分的 dummy_loss，确保 DDP 完全不报错
+        total_loss = total_loss + combined_preds[B:].sum() * 0.0
+
         total_loss.backward()
 
         # 裁剪模型参数梯度
@@ -133,7 +185,7 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
 
         if rank == 0:
             if AUTO_LOSS:
-                # 动态获取当前的自适应权重 (兼容 DDP)
+                # 动态获取当前前三个 Loss 的自适应权重
                 lw_module = loss_weighter.module if dist.is_initialized() else loss_weighter
                 cur_weights = lw_module.get_current_weights()
                 loop.set_postfix(
@@ -141,7 +193,7 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
                     W_M=f"{cur_weights[0]:.4f}",
                     W_G=f"{cur_weights[1]:.4f}",
                     W_P=f"{cur_weights[2]:.4f}",
-                    W_D=f"{cur_weights[3]:.4f}"
+                    W_D=f"Fix({LAMBDA_DCCA})"  # DCCA 使用明确的固定权重标记
                 )
             else:
                 loop.set_postfix(Loss=f"{total_loss.item():.4f}")
@@ -182,21 +234,43 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
             zeniths = batch['y_zenith'].to(device)
             y_clearsky = batch['y_clear_sky_ghi'].to(device)
 
-            preds_csi, v_feat, t_feat, _ = model(imgs, nums)
+            # 验证集同样采用拼接法进行一次前向传播
+            B = imgs.size(0)
+            noise_imgs = torch.randn_like(imgs)
+            noise_nums = torch.randn_like(nums)
+
+            combined_imgs = torch.cat([imgs, noise_imgs], dim=0)
+            combined_nums = torch.cat([nums, noise_nums], dim=0)
+
+            combined_preds, combined_v_feat, combined_t_feat, _ = model(combined_imgs, combined_nums)
+
+            # 切分结果
+            preds_csi = combined_preds[:B]
+            v_feat = combined_v_feat[:B]
+            t_feat = combined_t_feat[:B]
+
+            noise_v_feat = combined_v_feat[B:]
+            noise_t_feat = combined_t_feat[B:]
+
             preds_power = preds_csi * y_clearsky
 
             loss_mse = masked_mse_loss(preds_power, targets, zeniths)
             loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
             loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
-            loss_dcca = dcca_criterion(v_feat, t_feat)
 
-            # 🌟 验证集同样根据开关选择 Loss 融合方式
-            if AUTO_LOSS:
-                losses = [loss_mse, loss_grad, loss_phy, loss_dcca]
-                total_loss = loss_weighter(losses)
+            if v_feat.size(0) > 1:
+                loss_dcca = dcca_criterion(imgs, nums, v_feat, t_feat, noise_imgs, noise_nums, noise_v_feat,
+                                           noise_t_feat)
             else:
-                # total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
-                total_loss = ALPHA * loss_mse + LAMBDA_DCCA * loss_dcca
+                loss_dcca = torch.tensor(0.0, device=device)
+
+            # 🌟 验证集同样采用半自适应半固定计算模式
+            if AUTO_LOSS:
+                positive_losses = [loss_mse, loss_grad, loss_phy]
+                total_loss = loss_weighter(positive_losses, loss_dcca, lambda_dcca=LAMBDA_DCCA)
+            else:
+                total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
+
             sum_loss += total_loss.detach()
 
             night_mask = zeniths > 88
@@ -273,7 +347,7 @@ def main():
             os.makedirs(SAVE_DIR)
         logger = setup_logger(SAVE_DIR)
         set_seed(logger, 42)
-        mode_str = "自适应权重版" if AUTO_LOSS else "固定权重版"
+        mode_str = "自适应权重混合模式" if AUTO_LOSS else "全固定权重模式"
         if dist.is_initialized():
             logger.info(f"🚀 启动分布式训练 ({mode_str}) | World Size: {world_size} | 设备: {DEVICE}")
         else:
@@ -316,20 +390,19 @@ def main():
 
     loss_weighter = None
 
-    # 🌟 2. 根据开关决定是否构建自适应权重模块
+    # 🌟 2. 构建自适应权重模块 (只管理 3 个正数 Loss)
     if AUTO_LOSS:
-        loss_weighter = AdaptiveLossWeighter(num_losses=4).to(DEVICE)
+        # 注意: 这里的 3 对应 MSE, Grad, Physics
+        loss_weighter = AdaptiveLossWeighter(num_positive_losses=3).to(DEVICE)
 
     if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
-        # 如果启用了自适应，权重模块也需要 DDP 同步
         if AUTO_LOSS:
             loss_weighter = DDP(loss_weighter, device_ids=[local_rank], output_device=local_rank)
 
     # 🌟 3. 配置优化器
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
-    # 如果开启自适应，将权重模块参数放进优化器
     if AUTO_LOSS:
         optimizer.add_param_group({'params': loss_weighter.parameters(), 'lr': LEARNING_RATE * 5})
 
@@ -339,7 +412,7 @@ def main():
             logger.info("📉 检测到微调模式，使用 CosineAnnealingLR 调度器 (无预热，缓慢衰减)")
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=NUM_EPOCHS * len(train_loader),  # 按照步数退火
+            T_max=NUM_EPOCHS * len(train_loader),
             eta_min=5e-10
         )
     else:
@@ -350,7 +423,8 @@ def main():
             steps_per_epoch=len(train_loader), pct_start=0.1, anneal_strategy='cos'
         )
 
-    dcca_criterion = NRDCCALoss(lambd=1e-3, noise_std=0.05, nr_weight=0.5).to(DEVICE)
+    # 🌟 初始化最新的 NR-DCCA。基于论文推荐，可以尝试将 alpha 设为 2.0；若发现训练速度慢，可降至 1.0 或 0.5
+    dcca_criterion = NRDCCALoss(alpha=2.0, outdim=256).to(DEVICE)
 
     best_rmse = float('inf')
     best_mae = float('inf')
@@ -370,7 +444,6 @@ def main():
         if dist.is_initialized():
             train_sampler.set_epoch(epoch)
 
-        # 传入 loss_weighter（关闭自适应时为 None）
         train_loss = train_one_epoch(model, loss_weighter, train_loader, optimizer, DEVICE, scheduler, dcca_criterion,
                                      rank)
         val_loss, val_metrics = validate_distributed(model, loss_weighter, val_loader, DEVICE, dcca_criterion, rank)
@@ -395,12 +468,12 @@ def main():
             logger.info(
                 f"   => RMSE: {current_rmse:.4f} | MAE: {current_mae:.4f} | MAPE: {current_mape:.2f}% | R: {current_r:.2f}%")
 
-            # 🌟 根据开关决定日志打印内容
+            # 🌟 更新后的日志打印：展示自适应的 3 个权重和固定的 DCCA 权重
             if AUTO_LOSS:
                 lw_module = loss_weighter.module if dist.is_initialized() else loss_weighter
                 cur_weights = lw_module.get_current_weights()
                 logger.info(
-                    f"   => 动态权重: [MSE:{cur_weights[0]:.4f}, Grad:{cur_weights[1]:.4f}, Phy:{cur_weights[2]:.4f}, DCCA:{cur_weights[3]:.4f}]")
+                    f"   => 动态权重: [MSE:{cur_weights[0]:.4f}, Grad:{cur_weights[1]:.4f}, Phy:{cur_weights[2]:.4f}] | 固定 DCCA:{LAMBDA_DCCA:.4f}")
             else:
                 logger.info(
                     f"   => 固定权重: [MSE:{ALPHA:.4f}, Grad:{BETA:.4f}, Phy:{GAMMA:.4f}, DCCA:{LAMBDA_DCCA:.4f}]")
