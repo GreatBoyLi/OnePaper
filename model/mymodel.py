@@ -112,11 +112,11 @@ class MultiModalPVNet(nn.Module):
         final_v = fused_v.mean(dim=1)  # -> (Batch, transformer_dim)
 
         # 动态门控融合两股特征
-        final_out = self.fusion_layer(final_t, final_v)
+        final_out, g_weights = self.fusion_layer(final_t, final_v)
 
         preds = self.predictor(final_out)
 
-        return preds, v_feat_for_dcca, t_feat_for_dcca, t_attn_weights
+        return preds, v_feat_for_dcca, t_feat_for_dcca, t_attn_weights, g_weights
 
 
 # 测试块

@@ -37,7 +37,7 @@ ONLY_DAT_TIME = True
 
 BATCH_SIZE = 32
 # ⚠️ 注意：如果是微调 (加载了模型)，建议将学习率调小，例如 3e-5！
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 2e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
 WEIGHT_DECAY = 1e-4
@@ -49,7 +49,7 @@ TRANSFORMER_DIM = 128
 HEADS = 4
 
 # 🌟 总开关：是否开启自适应动态权重
-AUTO_LOSS = True
+AUTO_LOSS = False
 
 # 固定 Loss 权重 (当 AUTO_LOSS = False 时生效，或者用于混合模式下的 DCCA 约束)
 ALPHA = 10.0  # MSE
@@ -106,7 +106,7 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
         # ----------------------------------------------------
         # 🌟 第二步: 仅进行一次前向传播
         # ----------------------------------------------------
-        combined_preds, combined_v_feat, combined_t_feat, _ = model(combined_imgs, combined_nums)
+        combined_preds, combined_v_feat, combined_t_feat, t_attn_weights, g_weights = model(combined_imgs, combined_nums)
 
         # 将结果切分开来 (前半部分是真实数据，后半部分是纯噪声数据)
         preds_csi = combined_preds[:B]
@@ -242,7 +242,7 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
             combined_imgs = torch.cat([imgs, noise_imgs], dim=0)
             combined_nums = torch.cat([nums, noise_nums], dim=0)
 
-            combined_preds, combined_v_feat, combined_t_feat, _ = model(combined_imgs, combined_nums)
+            combined_preds, combined_v_feat, combined_t_feat, t_attn_weights, g_weights = model(combined_imgs, combined_nums)
 
             # 切分结果
             preds_csi = combined_preds[:B]

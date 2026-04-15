@@ -10,6 +10,10 @@ class GatedFusion(nn.Module):
         # 生成一个 0~1 的门控向量，决定听信哪个模态
         self.gate = nn.Sequential(
             nn.Linear(dim * 2, dim),
+            nn.GELU(),
+            # 🌟 关键修改：把输出维度从 dim 改为 1
+            # 强迫网络对整个模态给出一个唯一的 [0, 1] 打分！
+            nn.Linear(dim, 1),
             nn.Sigmoid()
         )
         self.out_proj = nn.Linear(dim, dim)
@@ -19,7 +23,12 @@ class GatedFusion(nn.Module):
         g = self.gate(torch.cat([t_feat, v_feat], dim=-1))
         # 动态加权：g 控制时序，(1-g) 控制视觉
         fused = g * t_feat + (1 - g) * v_feat
-        return self.out_proj(fused)
+        out_feat = self.out_proj(fused)
+
+        # 🌟 新增：计算当前样本在所有特征通道上的平均门控权重
+        # 得到一个 0~1 之间的标量，代表模型整体有多依赖“时序特征”
+        g_scalar = g.mean(dim=-1)
+        return out_feat, g_scalar
 
 
 class TemporalAttentionPooling(nn.Module):

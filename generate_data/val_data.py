@@ -129,10 +129,10 @@ def merge_validation_sets(file1, file2, output_file):
 
 if __name__ == "__main__":
     # 配置你的文件路径
-    INPUT_CSV = "../data/val/series_file.csv"
-    OUTPUT_CSV1 = "../data/val_2024_28days_sampled.csv"
-    OUTPUT_CSV2 = "../data/val_2024_10days_hardcore.csv"  # 输出的高难度验证集
-    OUTPUT_CSV3 = "../data/val/series_file_bak.csv"
+    INPUT_CSV = "../data/val/test_series_file.csv"
+    OUTPUT_CSV1 = "../data/val_test_28days_sampled.csv"
+    OUTPUT_CSV2 = "../data/val_test_10days_hardcore.csv"  # 输出的高难度验证集
+    OUTPUT_CSV3 = "../data/val/series_file_test.csv"
     full_28_day(INPUT_CSV, OUTPUT_CSV1)
 
     # 确保文件存在再运行
