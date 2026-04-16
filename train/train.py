@@ -37,25 +37,25 @@ ONLY_DAT_TIME = True
 
 BATCH_SIZE = 32
 # ⚠️ 注意：如果是微调 (加载了模型)，建议将学习率调小，例如 3e-5！
-LEARNING_RATE = 2e-4
+LEARNING_RATE = 1e-4
 NUM_EPOCHS = 100
 PATIENCE = 100
-WEIGHT_DECAY = 1e-4
-DROPOUT = 0.3
-SELF_DEPTH = 3
-CROSS_DEPTH = 3
+WEIGHT_DECAY = 1e-2
+DROPOUT = 0.5
+SELF_DEPTH = 2
+CROSS_DEPTH = 2
 FINAL_DIM = 64
-TRANSFORMER_DIM = 128
+TRANSFORMER_DIM = 64
 HEADS = 4
 
 # 🌟 总开关：是否开启自适应动态权重
 AUTO_LOSS = False
 
 # 固定 Loss 权重 (当 AUTO_LOSS = False 时生效，或者用于混合模式下的 DCCA 约束)
-ALPHA = 10.0  # MSE
-BETA = 1.0  # Grad MSE
+ALPHA = 20.0  # MSE
+BETA = 10.0  # Grad MSE
 GAMMA = 0.5  # Physics
-LAMBDA_DCCA = 0.004  # NR-DCCA
+LAMBDA_DCCA = 0.0003  # NR-DCCA
 
 
 # ================= 分布式初始化 =================
@@ -420,7 +420,7 @@ def main():
             logger.info("📈 检测到从头训练模式，使用 OneCycleLR 调度器 (含预热)")
         scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=LEARNING_RATE, epochs=NUM_EPOCHS,
-            steps_per_epoch=len(train_loader), pct_start=0.1, anneal_strategy='cos'
+            steps_per_epoch=len(train_loader), pct_start=0.3, anneal_strategy='cos'
         )
 
     # 🌟 初始化最新的 NR-DCCA。基于论文推荐，可以尝试将 alpha 设为 2.0；若发现训练速度慢，可降至 1.0 或 0.5
