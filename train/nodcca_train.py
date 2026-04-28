@@ -42,8 +42,8 @@ NUM_EPOCHS = 100
 PATIENCE = 15
 WEIGHT_DECAY = 1e-4
 DROPOUT = 0.1
-SELF_DEPTH = 2
-CROSS_DEPTH = 2
+SELF_DEPTH = 3
+CROSS_DEPTH = 3
 FINAL_DIM = 64
 TRANSFORMER_DIM = 64
 HEADS = 4
@@ -95,26 +95,30 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
         # ----------------------------------------------------
         # 🌟 第一步: 生成噪声并沿着 Batch 维度拼接 (优化显存与BN层)
         # ----------------------------------------------------
-        B = imgs.size(0)  # 记录原始 Batch Size
-        noise_imgs = torch.randn_like(imgs)
-        noise_nums = torch.randn_like(nums)
+        # B = imgs.size(0)  # 记录原始 Batch Size
+        # noise_imgs = torch.randn_like(imgs)
+        # noise_nums = torch.randn_like(nums)
 
         # 拼接数据，送入模型的大小变为 (2B, ...)
-        combined_imgs = torch.cat([imgs, noise_imgs], dim=0)
-        combined_nums = torch.cat([nums, noise_nums], dim=0)
+        # combined_imgs = torch.cat([imgs, noise_imgs], dim=0)
+        # combined_nums = torch.cat([nums, noise_nums], dim=0)
 
         # ----------------------------------------------------
         # 🌟 第二步: 仅进行一次前向传播
         # ----------------------------------------------------
-        combined_preds, combined_v_feat, combined_t_feat, t_attn_weights, g_weights = model(combined_imgs, combined_nums)
+        combined_preds, combined_v_feat, combined_t_feat, t_attn_weights, g_weights = model(imgs, nums)
+
+        preds_csi = combined_preds
+        v_feat = combined_v_feat
+        t_feat = combined_t_feat
 
         # 将结果切分开来 (前半部分是真实数据，后半部分是纯噪声数据)
-        preds_csi = combined_preds[:B]
-        v_feat = combined_v_feat[:B]
-        t_feat = combined_t_feat[:B]
+        # preds_csi = combined_preds[:B]
+        # v_feat = combined_v_feat[:B]
+        # t_feat = combined_t_feat[:B]
 
-        noise_v_feat = combined_v_feat[B:]
-        noise_t_feat = combined_t_feat[B:]
+        # noise_v_feat = combined_v_feat[B:]
+        # noise_t_feat = combined_t_feat[B:]
 
         # 模型预测功率 (仅使用真实数据部分)
         preds_power = preds_csi * y_clearsky
@@ -137,28 +141,28 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
             valid_v_feat = v_feat[daytime_sample_mask]
             valid_t_feat = t_feat[daytime_sample_mask]
 
-            valid_noise_imgs = noise_imgs[daytime_sample_mask]
-            valid_noise_nums = noise_nums[daytime_sample_mask]
-            valid_noise_v_feat = noise_v_feat[daytime_sample_mask]
-            valid_noise_t_feat = noise_t_feat[daytime_sample_mask]
+            # valid_noise_imgs = noise_imgs[daytime_sample_mask]
+            # valid_noise_nums = noise_nums[daytime_sample_mask]
+            # valid_noise_v_feat = noise_v_feat[daytime_sample_mask]
+            # valid_noise_t_feat = noise_t_feat[daytime_sample_mask]
 
             # 如果这个 Batch 里至少有 2 个白天样本 (DCCA 算相关性至少需要 2 个样本)
-            if valid_v_feat.size(0) > 1:
-                loss_dcca = dcca_criterion(
-                    valid_imgs, valid_nums, valid_v_feat, valid_t_feat,
-                    valid_noise_imgs, valid_noise_nums, valid_noise_v_feat, valid_noise_t_feat
-                )
-            else:
-                # 🛡️ DDP 保命符: 若跳过计算，需给一个乘以 0 的 loss
-                loss_dcca = (v_feat.sum() + t_feat.sum() + noise_v_feat.sum() + noise_t_feat.sum()) * 0.0
-        else:
-            if v_feat.size(0) > 1:
-                loss_dcca = dcca_criterion(
-                    imgs, nums, v_feat, t_feat,
-                    noise_imgs, noise_nums, noise_v_feat, noise_t_feat
-                )
-            else:
-                loss_dcca = (v_feat.sum() + t_feat.sum() + noise_v_feat.sum() + noise_t_feat.sum()) * 0.0
+        #     if valid_v_feat.size(0) > 1:
+        #         loss_dcca = dcca_criterion(
+        #             valid_imgs, valid_nums, valid_v_feat, valid_t_feat,
+        #             valid_noise_imgs, valid_noise_nums, valid_noise_v_feat, valid_noise_t_feat
+        #         )
+        #     else:
+        #         # 🛡️ DDP 保命符: 若跳过计算，需给一个乘以 0 的 loss
+        #         loss_dcca = (v_feat.sum() + t_feat.sum() + noise_v_feat.sum() + noise_t_feat.sum()) * 0.0
+        # else:
+        #     if v_feat.size(0) > 1:
+        #         loss_dcca = dcca_criterion(
+        #             imgs, nums, v_feat, t_feat,
+        #             noise_imgs, noise_nums, noise_v_feat, noise_t_feat
+        #         )
+        #     else:
+        #         loss_dcca = (v_feat.sum() + t_feat.sum() + noise_v_feat.sum() + noise_t_feat.sum()) * 0.0
 
         # ----------------------------------------------------
         # 🌟 第四步: Loss 混合权重计算 (半自适应半固定)
@@ -166,14 +170,15 @@ def train_one_epoch(model, loss_weighter, loader, optimizer, device, scheduler, 
         if AUTO_LOSS:
             positive_losses = [loss_mse, loss_grad, loss_phy]
             # 传入 3 个正数 Loss，外加单独的 loss_dcca 及其固定惩罚权重
-            total_loss = loss_weighter(positive_losses, loss_dcca, lambda_dcca=LAMBDA_DCCA)
+            # total_loss = loss_weighter(positive_losses, loss_dcca, lambda_dcca=LAMBDA_DCCA)
+            total_loss = 0
         else:
             #total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
-            total_loss = ALPHA * loss_mse + LAMBDA_DCCA * loss_dcca
-            # total_loss = ALPHA * loss_mse
+            #total_loss = ALPHA * loss_mse + LAMBDA_DCCA * loss_dcca
+            total_loss = ALPHA * loss_mse
 
         # 加上对未使用的噪声预测部分的 dummy_loss，确保 DDP 完全不报错
-        total_loss = total_loss + combined_preds[B:].sum() * 0.0
+        total_loss = total_loss # + combined_preds[B:].sum() * 0.0
 
         total_loss.backward()
 
@@ -237,22 +242,25 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
             y_clearsky = batch['y_clear_sky_ghi'].to(device)
 
             # 验证集同样采用拼接法进行一次前向传播
-            B = imgs.size(0)
-            noise_imgs = torch.randn_like(imgs)
-            noise_nums = torch.randn_like(nums)
+            # B = imgs.size(0)
+            # noise_imgs = torch.randn_like(imgs)
+            # noise_nums = torch.randn_like(nums)
+            #
+            # combined_imgs = torch.cat([imgs, noise_imgs], dim=0)
+            # combined_nums = torch.cat([nums, noise_nums], dim=0)
 
-            combined_imgs = torch.cat([imgs, noise_imgs], dim=0)
-            combined_nums = torch.cat([nums, noise_nums], dim=0)
-
-            combined_preds, combined_v_feat, combined_t_feat, t_attn_weights, g_weights = model(combined_imgs, combined_nums)
+            combined_preds, combined_v_feat, combined_t_feat, t_attn_weights, g_weights = model(imgs, nums)
+            preds_csi = combined_preds
+            v_feat = combined_v_feat
+            t_feat = combined_t_feat
 
             # 切分结果
-            preds_csi = combined_preds[:B]
-            v_feat = combined_v_feat[:B]
-            t_feat = combined_t_feat[:B]
-
-            noise_v_feat = combined_v_feat[B:]
-            noise_t_feat = combined_t_feat[B:]
+            # preds_csi = combined_preds[:B]
+            # v_feat = combined_v_feat[:B]
+            # t_feat = combined_t_feat[:B]
+            #
+            # noise_v_feat = combined_v_feat[B:]
+            # noise_t_feat = combined_t_feat[B:]
 
             preds_power = preds_csi * y_clearsky
 
@@ -260,20 +268,20 @@ def validate_distributed(model, loss_weighter, loader, device, dcca_criterion, r
             loss_grad = gradient_rmse_loss(preds_power, targets, zeniths)
             loss_phy = physics_constraint_loss(preds_power, y_clearsky, zeniths)
 
-            if v_feat.size(0) > 1:
-                loss_dcca = dcca_criterion(imgs, nums, v_feat, t_feat, noise_imgs, noise_nums, noise_v_feat,
-                                           noise_t_feat)
-            else:
-                loss_dcca = torch.tensor(0.0, device=device)
+            # if v_feat.size(0) > 1:
+            #     loss_dcca = dcca_criterion(imgs, nums, v_feat, t_feat, noise_imgs, noise_nums, noise_v_feat,
+            #                                noise_t_feat)
+            # else:
+            #     loss_dcca = torch.tensor(0.0, device=device)
 
             # 🌟 验证集同样采用半自适应半固定计算模式
             if AUTO_LOSS:
                 positive_losses = [loss_mse, loss_grad, loss_phy]
-                total_loss = loss_weighter(positive_losses, loss_dcca, lambda_dcca=LAMBDA_DCCA)
+                total_loss = 0 #loss_weighter(positive_losses, loss_dcca, lambda_dcca=LAMBDA_DCCA)
             else:
                 #total_loss = ALPHA * loss_mse + BETA * loss_grad + GAMMA * loss_phy + LAMBDA_DCCA * loss_dcca
-                total_loss = ALPHA * loss_mse + LAMBDA_DCCA * loss_dcca
-                # total_loss = ALPHA * loss_mse
+                #total_loss = ALPHA * loss_mse + LAMBDA_DCCA * loss_dcca
+                total_loss = ALPHA * loss_mse
 
             sum_loss += total_loss.detach()
 

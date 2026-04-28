@@ -3,15 +3,15 @@ train_file_paths:
   satellite_path: "../data/train/himawari_nc/"
   crop_statellite_path: "../data/train/crop_himawari/"
   aligned_satellite_path: "../data/train/crop_himawari/15min"
-  pv_file: "../data/筛选2020-2025数据.csv"
+  pv_file: "../data/筛选2020-2023数据.csv"
   series_file: "../data/train/series_file.csv"
 
 val_file_paths:
   satellite_path: "../data/val/himawari_nc/"
   crop_statellite_path: "../data/val/crop_himawari/"
   aligned_satellite_path: "../data/val/crop_himawari/15min"
-  pv_file: "../data/筛选2020-2025数据.csv"
-  series_file: "../data/val/series_file.csv"
+  pv_file: "../data/筛选2024数据.csv"
+  series_file: "../data/val/series_file_test.csv"
 
 
 scaler_params_paths: "../data/scaler_params.json"
@@ -41,6 +41,6 @@ train_dates:
   end_date: "2021-09-08"
 
 val_dates:
-  start_date: "2021-07-21"
-  end_date: "2021-08-19"
+  start_date: "2024-01-01"
+  end_date: "2024-12-31"
 
