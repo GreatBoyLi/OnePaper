@@ -17,9 +17,16 @@ HEADS = 4
 DROPOUT = 0.3
 
 # 你的模型与数据路径
-MODEL_PATH = "../checkpoints/Epoch:7-RMSE:0.0537-MAE:0.0223-MAPE:14.19%-R:98.00%.pth"
-VAL_CSV_PATH = "../data/val/hardcore_ramp_weather_2days.csv"
+MODEL_PATH = "../checkpoints/good/Epoch:7-RMSE:0.0537-MAE:0.0223-MAPE:14.19%-R:98.00%.pth"
+VAL_CSV_PATH = "../data/val/hardcore_clear_weather_2days.csv"
 VAL_SAT_DIR = "../data/val/crop_himawari/15min"
+
+if "mixed" in VAL_CSV_PATH:
+    name = "Mixed"
+elif "ramp" in VAL_CSV_PATH:
+    name = "Ramp"
+elif "clear" in VAL_CSV_PATH:
+    name = "Clear"
 
 
 def main():
@@ -117,7 +124,7 @@ def main():
     color_pred = '#d62728'
 
     ax1.set_xlabel('Time of Day (Effective Daylight Hours)', fontsize=12, fontweight='bold', labelpad=10)
-    ax1.set_ylabel('PV Power Generation (kW)', color=color_true, fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Normalized PV Output (p.u.)', color=color_true, fontsize=12, fontweight='bold')
 
     ax1.plot(x_axis, true_power, color=color_true, label='True Power', linewidth=2.5)
     ax1.plot(x_axis, pred_power, color=color_pred, linestyle='--', label='Predicted Power', linewidth=2)
@@ -150,11 +157,12 @@ def main():
     ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper center', bbox_to_anchor=(0.5, 1.12), ncol=4,
                frameon=False, prop={'size': 11})
 
-    plt.title('Dynamic Modality Routing under Clear Sky Conditions', pad=35, fontsize=15, fontweight='bold')
+    plt.title('Dynamic Modality Routing under ' + name + ' Conditions', pad=35, fontsize=15, fontweight='bold')
 
     plt.tight_layout()
-    plt.savefig('Gated_Fusion_ClearSky_Analysis.png', bbox_inches='tight')
-    print("✅ 成功生成晴天完美版图表: Gated_Fusion_ClearSky_Analysis.png")
+    finalname = "Gated_Fusion_" + name + "_Analysis.png"
+    plt.savefig(finalname, bbox_inches='tight')
+    print(f"✅ 成功生成晴天完美版图表: {finalname}")
     plt.show()
 
 
