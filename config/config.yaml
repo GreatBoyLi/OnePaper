@@ -11,8 +11,8 @@ val_file_paths:
   crop_statellite_path: "../data/val/crop_himawari/"
   aligned_satellite_path: "../data/val/crop_himawari/15min"
   pv_file: "../data/筛选2024数据.csv"
-  series_file: "../data/val/series_file_test.csv"
-
+#  series_file: "../data/val/series_file_test.csv"
+  series_file: "../data/val/overcast_shaded_samples.csv"
 
 scaler_params_paths: "../data/scaler_params.json"
 
@@ -37,10 +37,10 @@ statellite:
 
 # 4. 要处理的时间
 train_dates:
-  start_date: "2021-08-19"
-  end_date: "2021-09-08"
+  start_date: "2024-01-01"
+  end_date: "2024-01-21"
 
 val_dates:
-  start_date: "2024-01-01"
-  end_date: "2024-12-31"
+  start_date: "2024-10-01"
+  end_date: "2024-10-31"
 
