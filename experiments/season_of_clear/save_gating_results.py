@@ -27,27 +27,38 @@ HISTORY_LEN = 16
 PV_CAPACITY_KW = 5.0
 
 MODEL_PATH = "../../checkpoints/0428_depth_2_mse-dcca/Epoch:23-RMSE:0.0537-MAE:0.0194-MAPE:14.42%-R:97.97%.pth"
+
+# 卫星图像路径
 VAL_SAT_DIR = "../../data/val/crop_himawari/15min"
 
-SAVE_DIR = "./gating_saved_results"
+SAVE_DIR = "./season_prediction_results"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 
 # =========================
-# 1. 多天气 CSV 配置
+# 1. 春夏秋冬月份 CSV 配置
+# Alice Springs 在南半球：
+# Spring: 10月
+# Summer: 1月
+# Autumn: 4月
+# Winter: 7月
 # =========================
-WEATHER_FILES = [
+SEASON_FILES = [
     {
-        "name": "Clear",
-        "csv_path": "../../data/val/hardcore_clear_weather_2days.csv",
+        "name": "Spring",
+        "csv_path": "../../data/val/validate_chun.csv",
     },
     {
-        "name": "Cloudy",
-        "csv_path": "../../data/val/hardcore_mixed_weather_2days.csv",
+        "name": "Summer",
+        "csv_path": "../../data/val/validate_xia.csv",
     },
     {
-        "name": "Ramp",
-        "csv_path": "../../data/val/hardcore_ramp_weather_2days.csv",
+        "name": "Autumn",
+        "csv_path": "../../data/val/validate_qiu.csv",
+    },
+    {
+        "name": "Winter",
+        "csv_path": "../../data/val/validate_dong.csv",
     },
 ]
 
@@ -87,13 +98,13 @@ def load_model():
 
 
 # =========================
-# 3. 推理一个天气文件
+# 3. 推理一个月份文件
 # =========================
-def infer_one_weather(model, csv_path):
-    val_dataset = SatellitePVDataset(csv_path, VAL_SAT_DIR, mode="val")
+def infer_one_file(model, csv_path):
+    dataset = SatellitePVDataset(csv_path, VAL_SAT_DIR, mode="val")
 
-    val_loader = DataLoader(
-        val_dataset,
+    loader = DataLoader(
+        dataset,
         batch_size=1,
         shuffle=False,
         num_workers=4,
@@ -106,7 +117,7 @@ def infer_one_weather(model, csv_path):
 
     print(f"正在推断：{csv_path}")
 
-    for batch in val_loader:
+    for batch in loader:
         with torch.no_grad():
             imgs = batch["x_images"].to(DEVICE)
             nums = batch["x_numeric"].to(DEVICE)
@@ -151,19 +162,25 @@ def infer_one_weather(model, csv_path):
 # =========================
 # 4. 对齐时间轴并保存
 # =========================
-def build_and_save_dataframe(weather_name, csv_path, true_power_kw, pred_power_kw, gamma_values):
-    df_val = pd.read_csv(csv_path, parse_dates=True, index_col=0)
+def build_and_save_dataframe(season_name, csv_path, true_power_kw, pred_power_kw, gamma_values):
+    # 尽量兼容你的原始 CSV：默认第一列是时间索引
+    df_raw = pd.read_csv(csv_path, parse_dates=True, index_col=0)
 
-    if df_val.index.tz is not None:
-        df_val.index = df_val.index.tz_localize(None)
+    if df_raw.index.tz is not None:
+        df_raw.index = df_raw.index.tz_localize(None)
 
-    valid_df = df_val.dropna(subset=["Active_Power"])
+    # 和 Dataset 内部保持一致：剔除 Active_Power 缺失
+    if "Active_Power" in df_raw.columns:
+        valid_df = df_raw.dropna(subset=["Active_Power"]).copy()
+    else:
+        valid_df = df_raw.copy()
 
     min_len = min(len(true_power_kw), len(valid_df) - HISTORY_LEN)
 
     if min_len <= 0:
         raise ValueError(f"有效样本长度不足，请检查 CSV 文件：{csv_path}")
 
+    # 第一个预测样本对应 HISTORY_LEN 之后的时刻
     real_time_axis = valid_df.index[HISTORY_LEN: HISTORY_LEN + min_len]
 
     result_df = pd.DataFrame(
@@ -172,11 +189,12 @@ def build_and_save_dataframe(weather_name, csv_path, true_power_kw, pred_power_k
             "True_Power_kW": true_power_kw[:min_len],
             "Pred_Power_kW": pred_power_kw[:min_len],
             "Gamma": gamma_values[:min_len],
+            "Season": season_name,
         }
     )
 
-    # 尽量保留原 CSV 中的辅助字段，方便后面分析
-    aux_df = valid_df.iloc[HISTORY_LEN: HISTORY_LEN + min_len].copy().reset_index()
+    # 保留原 CSV 中的辅助字段，方便后面筛选晴天日和画图
+    aux_df = valid_df.iloc[HISTORY_LEN: HISTORY_LEN + min_len].copy().reset_index(drop=True)
 
     possible_cols = [
         "CSI",
@@ -187,41 +205,98 @@ def build_and_save_dataframe(weather_name, csv_path, true_power_kw, pred_power_k
         "GHI",
         "clear_sky_ghi",
         "y_clear_sky_ghi",
+        "Temperature",
+        "Air_Temperature",
+        "Relative_Humidity",
+        "Wind_Speed",
     ]
 
     for col in possible_cols:
         if col in aux_df.columns:
             result_df[col] = aux_df[col].values
 
-    save_path = os.path.join(SAVE_DIR, f"gating_results_{weather_name.lower()}.csv")
+    save_path = os.path.join(
+        SAVE_DIR,
+        f"prediction_results_{season_name.lower()}.csv"
+    )
+
     result_df.to_csv(save_path, index=False, encoding="utf-8-sig")
 
     print(f"已保存：{save_path}")
     print(f"样本数：{len(result_df)}")
+    print(f"时间范围：{result_df['Time'].iloc[0]}  ->  {result_df['Time'].iloc[-1]}")
 
     return save_path
 
 
 # =========================
-# 5. 主函数
+# 5. 可选：从每个季节结果中自动筛选晴天日
+# =========================
+def select_clear_day(result_csv_path, csi_threshold=0.8, zenith_threshold=85):
+    df = pd.read_csv(result_csv_path, parse_dates=["Time"])
+
+    if "CSI" not in df.columns:
+        print(f"跳过晴天日筛选：{result_csv_path} 中没有 CSI 列")
+        return None
+
+    if "Solar_Zenith_Raw" not in df.columns:
+        print(f"跳过晴天日筛选：{result_csv_path} 中没有 Solar_Zenith_Raw 列")
+        return None
+
+    df["Date"] = df["Time"].dt.date.astype(str)
+
+    df_day = df[df["Solar_Zenith_Raw"] <= zenith_threshold].copy()
+    df_day = df_day.dropna(subset=["CSI"])
+
+    daily_csi = (
+        df_day
+        .groupby("Date")["CSI"]
+        .mean()
+        .sort_values(ascending=False)
+    )
+
+    if len(daily_csi) == 0:
+        print(f"没有可用白天 CSI 数据：{result_csv_path}")
+        return None
+
+    clear_days = daily_csi[daily_csi >= csi_threshold]
+
+    if len(clear_days) > 0:
+        selected_date = clear_days.index[0]
+        selected_csi = clear_days.iloc[0]
+    else:
+        selected_date = daily_csi.index[0]
+        selected_csi = daily_csi.iloc[0]
+
+    print(f"晴天代表日：{selected_date}, daily mean CSI = {selected_csi:.4f}")
+
+    return selected_date
+
+
+# =========================
+# 6. 主函数
 # =========================
 def main():
     model = load_model()
 
     saved_files = []
+    selected_clear_days = {}
 
-    for item in WEATHER_FILES:
-        weather_name = item["name"]
+    for item in SEASON_FILES:
+        season_name = item["name"]
         csv_path = item["csv_path"]
 
         if not os.path.exists(csv_path):
             print(f"跳过：文件不存在 -> {csv_path}")
             continue
 
-        true_power_kw, pred_power_kw, gamma_values = infer_one_weather(model, csv_path)
+        true_power_kw, pred_power_kw, gamma_values = infer_one_file(
+            model=model,
+            csv_path=csv_path,
+        )
 
         save_path = build_and_save_dataframe(
-            weather_name=weather_name,
+            season_name=season_name,
             csv_path=csv_path,
             true_power_kw=true_power_kw,
             pred_power_kw=pred_power_kw,
@@ -230,9 +305,29 @@ def main():
 
         saved_files.append(save_path)
 
-    print("\n全部保存完成：")
+        selected_date = select_clear_day(save_path)
+        if selected_date is not None:
+            selected_clear_days[season_name] = selected_date
+
+    print("\n全部预测结果保存完成：")
     for f in saved_files:
         print(f)
+
+    print("\n各季节自动筛选的晴天代表日：")
+    for season, date_str in selected_clear_days.items():
+        print(f"{season}: {date_str}")
+
+    # 保存晴天代表日，后面画图代码可以直接读取
+    if len(selected_clear_days) > 0:
+        clear_day_path = os.path.join(SAVE_DIR, "selected_clear_days.csv")
+        pd.DataFrame(
+            [
+                {"Season": season, "Date": date_str}
+                for season, date_str in selected_clear_days.items()
+            ]
+        ).to_csv(clear_day_path, index=False, encoding="utf-8-sig")
+
+        print(f"\n晴天代表日已保存：{clear_day_path}")
 
 
 if __name__ == "__main__":

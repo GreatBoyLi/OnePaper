@@ -14,45 +14,35 @@ plt.rcParams["axes.unicode_minus"] = False
 # 1. 手动录入实验数据
 # =========================
 data = [
-    # Method, Season, RMSE, MAE, MAPE, R
+    # Method, Weather, RMSE, MAE, MAPE, R
 
     # 自己的方法
-    ["Ours", "Summer", 0.054694, 0.031647, 0.2733, 0.9751],
-    ["Ours", "Autumn", 0.039214, 0.013926, 0.1692, 0.9916],
-    ["Ours", "Winter", 0.043403, 0.014376, 0.2285, 0.9858],
-    ["Ours", "Spring", 0.085411, 0.035002, 0.6692, 0.9468],
-    ["Ours", "Total", 0.060531, 0.024203, 0.3666, 0.9798],
+    ["Ours", "Clear-sky", 0.016621, 0.011793, 0.0204, 0.9928],
+    ["Ours", "Cloudy", 0.045979, 0.034498, 0.0756, 0.9455],
+    ["Ours", "Rainy", 0.028359, 0.023343, 0.1506, 0.9649],
 
     # 2025年方法
-    ["CR-DCCA", "Summer", 0.065672, 0.033244, 0.4108, 0.9656],
-    ["CR-DCCA", "Autumn", 0.045169, 0.017152, 0.2519, 0.9881],
-    ["CR-DCCA", "Winter", 0.049129, 0.017916, 0.2840, 0.9825],
-    ["CR-DCCA", "Spring", 0.092428, 0.037129, 0.7807, 0.9311],
-    ["CR-DCCA", "Total", 0.065925, 0.026436, 0.4459, 0.9688],
+    ["CR-DCCA", "Clear-sky", 0.019075, 0.015142, 0.0269, 0.9870],
+    ["CR-DCCA", "Cloudy", 0.054665, 0.037993, 0.0793, 0.9421],
+    ["CR-DCCA", "Rainy", 0.053333, 0.042538, 0.2156, 0.9055],
 
     # 2024年方法
-    ["ROI-Hybrid", "Summer", 0.065362, 0.031821, 0.3212, 0.9657],
-    ["ROI-Hybrid", "Autumn", 0.041230, 0.014757, 0.2319, 0.9902],
-    ["ROI-Hybrid", "Winter", 0.048295, 0.016698, 0.2718, 0.9828],
-    ["ROI-Hybrid", "Spring", 0.089900, 0.034991, 0.7431, 0.9367],
-    ["ROI-Hybrid", "Total", 0.064158, 0.024647, 0.4033, 0.9702],
+    ["ROI-Hybrid", "Clear-sky", 0.018993, 0.010883, 0.0198, 0.9894],
+    ["ROI-Hybrid", "Cloudy", 0.065007, 0.046798, 0.0931, 0.9268],
+    ["ROI-Hybrid", "Rainy", 0.053688, 0.043748, 0.2595, 0.8067],
 
     # 2023年方法
-    ["IV-CMA", "Summer", 0.066924, 0.033021, 0.4255, 0.9650],
-    ["IV-CMA", "Autumn", 0.043372, 0.015829, 0.2380, 0.9890],
-    ["IV-CMA", "Winter", 0.049590, 0.017771, 0.3185, 0.9818],
-    ["IV-CMA", "Spring", 0.095255, 0.038897, 0.8206, 0.9320],
-    ["IV-CMA", "Total", 0.067040, 0.026466, 0.4652, 0.9681],
+    ["IV-CMA", "Clear-sky", 0.026132, 0.017910, 0.0357, 0.9897],
+    ["IV-CMA", "Cloudy", 0.054705, 0.036286, 0.0777, 0.9429],
+    ["IV-CMA", "Rainy", 0.044236, 0.033700, 0.2090, 0.9521],
 
     # 2022年方法
-    ["STUNet", "Summer", 0.073177, 0.035679, 0.3269, 0.9569],
-    ["STUNet", "Autumn", 0.047533, 0.016286, 0.1935, 0.9868],
-    ["STUNet", "Winter", 0.046663, 0.014579, 0.2308, 0.9839],
-    ["STUNet", "Spring", 0.102221, 0.038636, 0.8002, 0.9196],
-    ["STUNet", "Total", 0.071296, 0.026377, 0.4024, 0.9634],
+    ["STUNet", "Clear-sky", 0.016397, 0.012172, 0.0209, 0.9919],
+    ["STUNet", "Cloudy", 0.071146, 0.049082, 0.1048, 0.9070],
+    ["STUNet", "Rainy", 0.057354, 0.045935, 0.2516, 0.9294],
 ]
 
-df = pd.DataFrame(data, columns=["Method", "Season", "RMSE", "MAE", "MAPE", "R"])
+df = pd.DataFrame(data, columns=["Method", "Weather", "RMSE", "MAE", "MAPE", "R"])
 
 # =========================
 # 2. 指标归一化
@@ -64,8 +54,8 @@ metrics_pos = ["R"]
 
 df_score = df.copy()
 
-for season in df["Season"].unique():
-    idx = df["Season"] == season
+for weather in df["Weather"].unique():
+    idx = df["Weather"] == weather
 
     # 误差类指标：越小越好
     for m in metrics_neg:
@@ -96,16 +86,16 @@ df_score["TotalScore"] = (
 
 # 可选：打印综合得分，便于检查
 print(
-    df_score[["Method", "Season", "TotalScore"]]
-    .sort_values(["Season", "TotalScore"], ascending=[True, False])
+    df_score[["Method", "Weather", "TotalScore"]]
+    .sort_values(["Weather", "TotalScore"], ascending=[True, False])
 )
 
 # =========================
 # 4. 整理雷达图数据
 # =========================
-radar_data = df_score.pivot(index="Method", columns="Season", values="TotalScore")
+radar_data = df_score.pivot(index="Method", columns="Weather", values="TotalScore")
 
-labels = ["Spring", "Summer", "Autumn", "Winter", "Total"]
+labels = ["Clear-sky", "Cloudy", "Rainy"]
 radar_data = radar_data[labels]
 
 # 按图例顺序排列
@@ -124,7 +114,7 @@ radar_data = radar_data.loc[method_order]
 angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
 angles += angles[:1]
 
-fig = plt.figure(figsize=(9, 8))
+fig = plt.figure(figsize=(8.5, 7.5))
 ax = plt.subplot(111, polar=True)
 
 for method in radar_data.index:
@@ -150,44 +140,50 @@ for method in radar_data.index:
         )
         ax.fill(angles, values, alpha=0.05)
 
-# 坐标轴设置
+# =========================
+# 6. 坐标轴设置
+# =========================
 ax.set_xticks(angles[:-1])
-ax.set_xticklabels(labels, fontsize=12)
+ax.set_xticklabels(labels, fontsize=13)
 
-ax.set_ylim(0, 1)
+# 外圈标签向外偏移，避免被折线挡住
+ax.tick_params(axis="x", pad=14)
+
+ax.set_ylim(0, 1.05)
 ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
 ax.set_yticklabels(["0.2", "0.4", "0.6", "0.8", "1.0"], fontsize=10)
-ax.tick_params(axis="x", pad=9)
-ax.set_ylim(0, 1.02)
 
-# 可选标题；论文里通常可以不放英文标题，直接用图注说明
+# 把径向刻度标签挪到右上侧，避免和顶部标签重叠
+ax.set_rlabel_position(22.5)
+
+# 不设置标题，论文里用图注说明即可
 # ax.set_title("", fontsize=14, pad=22)
 
 # 图例放到底部，分成两列
 ax.legend(
     loc="upper center",
-    bbox_to_anchor=(0.5, -0.04),
+    bbox_to_anchor=(0.5, -0.02),
     ncol=2,
     fontsize=10,
     frameon=True
 )
 
 plt.tight_layout()
-plt.subplots_adjust(bottom=0.20)
+plt.subplots_adjust(bottom=0.18)
 
 # =========================
-# 6. 保存图像
+# 7. 保存图像
 # =========================
 save_dir = "/data0/ybf/lee/workspace/OnePaper/experiments/radarImage"
 os.makedirs(save_dir, exist_ok=True)
 
-png_path = os.path.join(save_dir, "seasonal_weighted_radar.png")
-pdf_path = os.path.join(save_dir, "seasonal_weighted_radar.pdf")
-svg_path = os.path.join(save_dir, "seasonal_weighted_radar.svg")
+png_path = os.path.join(save_dir, "weather_weighted_radar1.png")
+pdf_path = os.path.join(save_dir, "weather_weighted_radar2.pdf")
+svg_path = os.path.join(save_dir, "weather_weighted_radar1.svg")
 
-plt.savefig(png_path, dpi=900, bbox_inches="tight")
-plt.savefig(pdf_path, bbox_inches="tight")
-plt.savefig(svg_path, bbox_inches="tight")
+plt.savefig(png_path, dpi=900, bbox_inches="tight", pad_inches=0.05)
+plt.savefig(pdf_path, bbox_inches="tight", pad_inches=0.05)
+plt.savefig(svg_path, bbox_inches="tight", pad_inches=0.05)
 
 print(f"PNG saved to: {png_path}")
 print(f"PDF saved to: {pdf_path}")

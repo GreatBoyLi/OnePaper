@@ -25,7 +25,7 @@ OUTPUT_SEQ_LEN = 4
 
 HISTORY_LEN = 16
 
-MODEL_PATH = "../../checkpoints/good/Epoch:7-RMSE:0.0537-MAE:0.0223-MAPE:14.19%-R:98.00%.pth"
+MODEL_PATH = "../../checkpoints/0428_depth_2_mse-dcca/Epoch:23-RMSE:0.0537-MAE:0.0194-MAPE:14.42%-R:97.97%.pth"
 VAL_SAT_DIR = "../../data/val/crop_himawari/15min"
 
 SAVE_DIR = "./gating_weight_figures"

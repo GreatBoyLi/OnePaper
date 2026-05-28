@@ -19,7 +19,7 @@ print(TEST_CSV_PATH)
 print(TEST_SAT_DIR)
 
 # 加载的模型权重路径
-MODEL_WEIGHT_PATH = "../../checkpoints/good/Epoch:7-RMSE:0.0537-MAE:0.0223-MAPE:14.19%-R:98.00%.pth"
+MODEL_WEIGHT_PATH = "../../checkpoints/0428_depth_2_mse-dcca/Epoch:23-RMSE:0.0537-MAE:0.0194-MAPE:14.42%-R:97.97%.pth"
 
 BATCH_SIZE = 32
 NUM_WORKERS = 4

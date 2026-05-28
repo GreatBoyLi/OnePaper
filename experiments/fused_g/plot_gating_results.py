@@ -15,7 +15,7 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 PLOT_FILES = [
     {
-        "name": "Clear",
+        "name": "Clear-sky",
         "csv_path": os.path.join(RESULT_DIR, "gating_results_clear.csv"),
         "start_hour": "06:00",
         "end_hour": "20:00",
@@ -27,7 +27,7 @@ PLOT_FILES = [
         "end_hour": "20:00",
     },
     {
-        "name": "Ramp",
+        "name": "Rainy",
         "csv_path": os.path.join(RESULT_DIR, "gating_results_ramp.csv"),
         "start_hour": "06:00",
         "end_hour": "20:00",
@@ -74,11 +74,15 @@ def build_continuous_time_df(csv_path, start_hour="06:00", end_hour="20:00"):
     start_time = f"{unique_dates[0]} {start_hour}"
     end_time = f"{unique_dates[-1]} {end_hour}"
 
-    target_index = pd.date_range(start=start_time, end=end_time, freq="15min")
+    target_index = pd.date_range(
+        start=start_time,
+        end=end_time,
+        freq="15min"
+    )
 
     df = df.reindex(target_index)
 
-    # 功率缺失时段填 0，门控权重不填 0
+    # 功率缺失时段填 0，门控权重保持 NaN
     df["True_Power_kW"] = df["True_Power_kW"].fillna(0.0)
     df["Pred_Power_kW"] = df["Pred_Power_kW"].fillna(0.0)
     df["Gamma"] = df["Gamma"].fillna(np.nan)
@@ -87,7 +91,37 @@ def build_continuous_time_df(csv_path, start_hour="06:00", end_hour="20:00"):
 
 
 # =========================
-# 3. 画单个天气图
+# 3. 构造紧凑横轴标签
+# =========================
+def build_compact_xticks(df, tick_spacing=16):
+    """
+    tick_spacing=16 表示每 4 小时一个刻度，因为数据是 15 min 间隔。
+    跨天位置显示日期+时间，例如 07-01 06:00；
+    同一天内其它刻度只显示时间，例如 10:00。
+    """
+    x_axis = np.arange(len(df))
+
+    tick_positions = x_axis[::tick_spacing]
+    tick_times = df.index[tick_positions]
+
+    labels = []
+    last_date = None
+
+    for t in tick_times:
+        current_date = t.date()
+
+        if last_date is None or current_date != last_date:
+            labels.append(t.strftime("%m-%d %H:%M"))
+        else:
+            labels.append(t.strftime("%H:%M"))
+
+        last_date = current_date
+
+    return tick_positions, labels
+
+
+# =========================
+# 4. 画单个天气图
 # =========================
 def plot_one_weather(df, weather_name):
     true_power = df["True_Power_kW"].values
@@ -95,26 +129,29 @@ def plot_one_weather(df, weather_name):
     gamma = df["Gamma"].values
 
     x_axis = np.arange(len(df))
-    time_labels = df.index.strftime("%m-%d %H:%M").tolist()
 
-    fig, ax1 = plt.subplots(figsize=(16, 6))
+    # IEEE 双栏图推荐尺寸
+    fig, ax1 = plt.subplots(figsize=(7.4, 3.6))
 
     color_true = "black"
     color_pred = "#d62728"
     color_gamma = "#1f77b4"
 
+    # -------------------------
+    # 左轴：真实功率与预测功率
+    # -------------------------
     ax1.set_xlabel(
         "Time",
-        fontsize=12,
+        fontsize=10,
         fontweight="bold",
-        labelpad=10,
+        labelpad=4,
         fontproperties=FONT_PROP,
     )
 
     ax1.set_ylabel(
         "PV Power (kW)",
         color=color_true,
-        fontsize=12,
+        fontsize=10,
         fontweight="bold",
         fontproperties=FONT_PROP,
     )
@@ -124,7 +161,8 @@ def plot_one_weather(df, weather_name):
         true_power,
         color=color_true,
         label="True Power",
-        linewidth=2.5,
+        linewidth=1.6,
+        zorder=3,
     )
 
     ax1.plot(
@@ -133,18 +171,30 @@ def plot_one_weather(df, weather_name):
         color=color_pred,
         linestyle="--",
         label="Predicted Power",
-        linewidth=2.0,
+        linewidth=1.5,
+        zorder=3,
     )
 
-    ax1.tick_params(axis="y", labelcolor=color_true)
-    ax1.grid(True, linestyle=":", alpha=0.5, color="gray")
+    ax1.tick_params(axis="y", labelcolor=color_true, labelsize=9)
+    ax1.tick_params(axis="x", labelsize=8, pad=2)
 
+    ax1.grid(
+        True,
+        linestyle=":",
+        linewidth=0.6,
+        alpha=0.45,
+        color="gray"
+    )
+
+    # -------------------------
+    # 右轴：门控权重 gamma
+    # -------------------------
     ax2 = ax1.twinx()
 
     ax2.set_ylabel(
-        r"Temporal Modality Weight $\gamma$",
+        r"Temporal Weight $\gamma$",
         color=color_gamma,
-        fontsize=12,
+        fontsize=10,
         fontweight="bold",
         fontproperties=FONT_PROP,
     )
@@ -154,7 +204,8 @@ def plot_one_weather(df, weather_name):
         gamma,
         color=color_gamma,
         label=r"Gating Weight $\gamma$",
-        linewidth=2.5,
+        linewidth=1.7,
+        zorder=2,
     )
 
     ax2.fill_between(
@@ -162,29 +213,48 @@ def plot_one_weather(df, weather_name):
         0,
         gamma,
         color=color_gamma,
-        alpha=0.15,
+        alpha=0.10,
         where=~np.isnan(gamma),
+        zorder=1,
     )
 
-    ax2.set_ylim(-0.05, 1.05)
-    ax2.tick_params(axis="y", labelcolor=color_gamma)
+    ax2.set_ylim(0.0, 1.0)
+    ax2.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    ax2.tick_params(axis="y", labelcolor=color_gamma, labelsize=9)
 
-    # 每 3 小时一个刻度
-    tick_spacing = 12
-    ax1.set_xticks(x_axis[::tick_spacing])
+    # -------------------------
+    # 横轴紧凑显示
+    # -------------------------
+    tick_positions, tick_labels = build_compact_xticks(
+        df,
+        tick_spacing=16
+    )
+
+    ax1.set_xticks(tick_positions)
     ax1.set_xticklabels(
-        time_labels[::tick_spacing],
-        rotation=25,
+        tick_labels,
+        rotation=20,
         ha="right",
         fontproperties=FONT_PROP,
+        fontsize=8,
     )
 
+    # 去掉左右空白，让曲线更紧凑
+    ax1.set_xlim(0, len(df) - 1)
+    ax1.margins(x=0)
+
+    # -------------------------
+    # 字体统一
+    # -------------------------
     for label in ax1.get_yticklabels():
         label.set_fontproperties(FONT_PROP)
 
     for label in ax2.get_yticklabels():
         label.set_fontproperties(FONT_PROP)
 
+    # -------------------------
+    # 图例
+    # -------------------------
     lines_1, labels_1 = ax1.get_legend_handles_labels()
     lines_2, labels_2 = ax2.get_legend_handles_labels()
 
@@ -192,23 +262,73 @@ def plot_one_weather(df, weather_name):
         lines_1 + lines_2,
         labels_1 + labels_2,
         loc="upper center",
-        bbox_to_anchor=(0.5, 1.12),
+        bbox_to_anchor=(0.5, 1.18),
         ncol=3,
         frameon=False,
+        fontsize=8.5,
         prop=FONT_PROP,
+        handlelength=2.0,
+        columnspacing=1.0,
+        handletextpad=0.4,
     )
 
-    plt.tight_layout()
+    # -------------------------
+    # 天气类型标注
+    # -------------------------
+    ax1.text(
+        0.01,
+        0.95,
+        weather_name,
+        transform=ax1.transAxes,
+        fontsize=10,
+        fontweight="bold",
+        va="top",
+        ha="left",
+        fontproperties=FONT_PROP,
+        bbox=dict(
+            facecolor="white",
+            edgecolor="none",
+            alpha=0.75,
+            pad=1.5
+        ),
+    )
 
-    base_name = f"gating_weight_{weather_name.lower()}"
+    # 边框细化
+    for spine in ax1.spines.values():
+        spine.set_linewidth(0.8)
+
+    for spine in ax2.spines.values():
+        spine.set_linewidth(0.8)
+
+    plt.tight_layout(pad=0.4)
+
+    # =========================
+    # 保存图像
+    # =========================
+    base_name = f"gating_weight_{weather_name.lower().replace('-', '_')}"
 
     png_path = os.path.join(SAVE_DIR, base_name + ".png")
     pdf_path = os.path.join(SAVE_DIR, base_name + ".pdf")
     svg_path = os.path.join(SAVE_DIR, base_name + ".svg")
 
-    plt.savefig(png_path, dpi=600, bbox_inches="tight")
-    plt.savefig(pdf_path, bbox_inches="tight")
-    plt.savefig(svg_path, bbox_inches="tight")
+    plt.savefig(
+        png_path,
+        dpi=900,
+        bbox_inches="tight",
+        pad_inches=0.02
+    )
+
+    plt.savefig(
+        pdf_path,
+        bbox_inches="tight",
+        pad_inches=0.02
+    )
+
+    plt.savefig(
+        svg_path,
+        bbox_inches="tight",
+        pad_inches=0.02
+    )
 
     print(f"已保存：{png_path}")
     print(f"已保存：{pdf_path}")
@@ -218,7 +338,7 @@ def plot_one_weather(df, weather_name):
 
 
 # =========================
-# 4. 统计 Gamma
+# 5. 统计 Gamma
 # =========================
 def summarize_gamma(plot_files):
     rows = []
@@ -254,7 +374,7 @@ def summarize_gamma(plot_files):
 
 
 # =========================
-# 5. 主函数
+# 6. 主函数
 # =========================
 def main():
     for item in PLOT_FILES:
